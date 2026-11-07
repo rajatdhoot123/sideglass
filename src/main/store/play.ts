@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import type { Adb } from '../adb'
 import { ensureAvd, PLAY_PHONE, startEmulator, stopEmulator, type RunningEmulator } from '../emulator'
-import { Screen } from '../screen'
+import { Mirror } from '../mirror'
 import type { Sdk } from '../sdk'
 import { apkPaths, isPackageName, pullApp } from './apk'
 
@@ -62,10 +62,13 @@ async function readPlayStorePath(adb: Adb): Promise<string> {
 
 export class PlayHelper extends EventEmitter {
   emulator: RunningEmulator | null = null
-  screen: Screen | null = null
+  screen: Mirror | null = null
   private storeChecked = false
 
-  constructor(private readonly sdk: Sdk) {
+  constructor(
+    private readonly sdk: Sdk,
+    private readonly cacheDir: string,
+  ) {
     super()
   }
 
@@ -110,8 +113,11 @@ export class PlayHelper extends EventEmitter {
 
   private async attachScreen(emulator: RunningEmulator): Promise<void> {
     if (this.screen) return
-    this.screen = new Screen(emulator.adb)
+    this.screen = new Mirror(emulator.adb, this.cacheDir, 2)
     this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
+    this.screen.on('video', (packet) => this.emit('video', packet))
+    this.screen.on('mode', (mode) => this.emit('screen-mode', mode))
+    this.screen.on('log', (line: string) => this.log(line))
     await this.screen.start()
   }
 

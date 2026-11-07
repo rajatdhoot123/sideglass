@@ -10,7 +10,7 @@ import { usbPhones, userApps } from './store/usb'
 import { Adb } from './adb'
 import { Logcat } from './logcat'
 import { CaptureProxy } from './proxy'
-import { Screen } from './screen'
+import { Mirror } from './mirror'
 import { findSdk, type Sdk } from './sdk'
 import type { LaunchResult } from '../shared'
 
@@ -27,7 +27,7 @@ export class Session extends EventEmitter {
   sdk: Sdk | null = null
   ca: CaFiles | null = null
   emulator: RunningEmulator | null = null
-  screen: Screen | null = null
+  screen: Mirror | null = null
   logcat: Logcat | null = null
 
   constructor(private readonly dataDir: string) {
@@ -83,8 +83,11 @@ export class Session extends EventEmitter {
           ' && am set-debug-app --persistent com.android.chrome && am force-stop com.android.chrome',
       )
       .catch(() => undefined)
-    this.screen = new Screen(emu.adb)
+    this.screen = new Mirror(emu.adb, join(this.dataDir, 'scrcpy'), 1)
     this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
+    this.screen.on('video', (packet) => this.emit('video', packet))
+    this.screen.on('mode', (mode) => this.emit('screen-mode', mode))
+    this.screen.on('log', (line: string) => this.log(line))
     await this.screen.start()
     this.logcat = new Logcat(emu.adb)
     this.logcat.on('lines', (lines) => this.emit('logcat', lines))
@@ -210,9 +213,11 @@ export class Session extends EventEmitter {
 
   private playHelper(): PlayHelper {
     if (!this.play) {
-      this.play = new PlayHelper(this.sdk!)
+      this.play = new PlayHelper(this.sdk!, join(this.dataDir, 'scrcpy'))
       this.play.on('log', (l) => this.emit('store-log', l))
       this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
+      this.play.on('video', (packet) => this.emit('play-video', packet))
+      this.play.on('screen-mode', (mode) => this.emit('play-screen-mode', mode))
       this.play.on('stage', (st) => this.emit('play-stage', st))
     }
     return this.play

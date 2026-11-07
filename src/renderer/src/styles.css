@@ -61,8 +61,9 @@ h4 { margin: 10px 0 4px; color: var(--muted); font-weight: 500; }
 .log.E, .log.F { color: var(--bad); }
 .toolbar { display: flex; gap: 6px; }
 .toolbar select { flex: 1; }
-.screen { flex: 1; display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; overflow: hidden; }
-.screen img { max-height: 100%; max-width: 100%; border-radius: 18px; border: 2px solid #000; cursor: pointer; user-select: none; }
+.screen { position: relative; flex: 1; display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; overflow: hidden; }
+.screen img, .screen canvas { max-height: 100%; max-width: 100%; border-radius: 18px; border: 2px solid #000; cursor: pointer; user-select: none; touch-action: none; outline: none; }
+.screen canvas.pending { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; border: 0; }
 .navkeys { display: flex; justify-content: center; gap: 30px; }
 .typebar input { width: 100%; }
 .sms { display: flex; flex-direction: column; gap: 6px; }

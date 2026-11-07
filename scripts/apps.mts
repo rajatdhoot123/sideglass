@@ -17,7 +17,7 @@ console.log('F-Droid install NewPipe:', await installFromFdroid(capture, 'org.sc
 
 const pkg = packageFromPlayLink('https://play.google.com/store/apps/details?id=org.wikipedia&hl=en_IN')!
 console.log('Play link ->', pkg)
-const play = new PlayHelper(sdk)
+const play = new PlayHelper(sdk, join(process.cwd(), '.smoke-data', 'scrcpy'))
 play.on('log', log)
 const playAdb = await play.start()
 await capture.shell(`pm uninstall ${pkg}`).catch(() => '')
