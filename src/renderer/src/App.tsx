@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { ExchangeSummary, LogLine, Progress, Settings, TlsFailure } from '../../shared'
+import type { Device, ExchangeSummary, LogLine, Progress, Settings, TlsFailure } from '../../shared'
 import { PhoneChoice, SettingsDialog } from './PhoneChoice'
 import { Phone } from './Phone'
 import { Requests } from './Requests'
@@ -20,6 +20,7 @@ export function App() {
   /** null until loaded; no `phone` yet means first run: ask. */
   const [settings, setSettings] = useState<Settings | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [activeDevice, setActiveDevice] = useState<Device>('capture')
   const ready = progress.ready?.state === 'done'
 
   /** Save the phone choice and start a fresh session with it. */
@@ -32,6 +33,7 @@ export function App() {
     setRefused([])
     setLogs([])
     setAppPid(null)
+    setActiveDevice('capture')
     setSettings(saved)
     void window.api.start()
   }
@@ -120,7 +122,7 @@ export function App() {
         {tab === 'logs' && <Logs lines={logs} pid={appPid} />}
         {tab === 'refused' && <Refused list={refused} />}
       </section>
-      <Phone mode={settings.phone} onLaunched={setAppPid} />
+      <Phone mode={settings.phone} activeDevice={activeDevice} onActiveDevice={setActiveDevice} onLaunched={setAppPid} />
       {dialog}
     </div>
   )

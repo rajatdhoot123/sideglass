@@ -8,7 +8,7 @@ import { PlayHelper } from '../src/main/store/play'
 const pkg = process.argv[2] ?? 'com.google.android.apps.authenticator2'
 const sdk = findSdk()!
 const capture = new Adb(sdk.adb, 'emulator-5590')
-const play = new PlayHelper(sdk)
+const play = new PlayHelper(sdk, join(process.cwd(), '.smoke-data', 'scrcpy'))
 play.on('log', (l) => console.log('  log:', l))
 play.on('stage', (s) => console.log('  stage:', s.stage, '-', s.message))
 const playAdb = await play.start()

@@ -28,8 +28,18 @@ export function needsPlayLicense(packageDump: string): boolean {
 
 /** True when com.android.vending is the real Play Store rather than the LicenseChecker stub. */
 export async function hasPlayStore(adb: Adb): Promise<boolean> {
-  const out = await adb.shell('pm path com.android.vending').catch(() => '')
-  return out.includes('.apk') && !/LicenseChecker/i.test(out)
+  const deadline = Date.now() + 20_000
+  while (Date.now() < deadline) {
+    try {
+      const out = await adb.shell('pm path com.android.vending')
+      if (/LicenseChecker/i.test(out)) return false
+      if (out.includes('.apk')) return true
+    } catch {
+      // Package manager is often still down after sys.boot_completed.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+  }
+  return false
 }
 
 /** Copy the Play Store's system APK and its permission allowlist off the Play phone, once. */

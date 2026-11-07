@@ -167,7 +167,7 @@ function Play({ note, onInstalled }: Props) {
         </form>
         <label className="small">
           <input type="checkbox" checked={openWhenReady} onChange={(e) => setOpenWhenReady(e.target.checked)} /> Open
-          the app on the capture phone when it is ready
+          the app when it is ready, on the phone that can run it
         </label>
         <ul className="muted small">
           <li>Sideglass taps Install for you and only stops when it needs you (sign-in, a prompt, a paid app).</li>

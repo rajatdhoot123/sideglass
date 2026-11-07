@@ -1,6 +1,7 @@
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import type { KeyEvent } from '../shared'
 import { toHar } from './har'
 import { Session } from './session'
 import { loadSettings, saveSettings } from './settings'
@@ -40,23 +41,28 @@ ipcMain.handle('session:start', async () => {
   if (session) return
   const settings = loadSettings(settingsFile())
   if (!settings.phone) return
-  session = new Session(join(app.getPath('userData'), 'data'), settings)
-  session.on('progress', (p) => send('progress', p))
-  session.on('setup-log', (l) => send('setup-log', l))
-  session.on('frame', (png: Buffer) => send('frame', 'capture', new Uint8Array(png)))
-  session.on('play-frame', (png: Buffer) => send('frame', 'play', new Uint8Array(png)))
-  session.on('store-log', (l) => send('store-log', l))
-  session.on('play-stage', (st) => send('play-stage', st))
-  session.on('logcat', (lines) => send('logcat', lines))
-  session.proxy.on('exchange', (e) => send('exchange', e))
-  session.proxy.on('tls-failure', (f) => send('tls-failure', f))
+  const current = new Session(join(app.getPath('userData'), 'data'), settings)
+  session = current
+  current.on('progress', (p) => send('progress', p))
+  current.on('setup-log', (l) => send('setup-log', l))
+  current.on('frame', (png: Buffer) => send('frame', 'capture', new Uint8Array(png)))
+  current.on('play-frame', (png: Buffer) => send('frame', 'play', new Uint8Array(png)))
+  current.on('video', (packet) => send('video', 'capture', packet))
+  current.on('play-video', (packet) => send('video', 'play', packet))
+  current.on('screen-mode', (mode) => send('screen-mode', 'capture', mode))
+  current.on('play-screen-mode', (mode) => send('screen-mode', 'play', mode))
+  current.on('store-log', (l) => send('store-log', l))
+  current.on('play-stage', (st) => send('play-stage', st))
+  current.on('logcat', (lines) => send('logcat', lines))
+  current.proxy.on('exchange', (e) => send('exchange', e))
+  current.proxy.on('tls-failure', (f) => send('tls-failure', f))
   try {
-    await session.start()
+    await current.start()
   } catch (error) {
     send('setup-log', `Setup stopped: ${(error as Error).message}`)
-    const failed = session
-    session = null
-    await failed.stop().catch(() => undefined)
+    // A settings change may already have replaced this session. Don't drop the new one.
+    if (session === current) session = null
+    await current.stop().catch(() => undefined)
   }
 })
 ipcMain.handle('settings:get', () => loadSettings(settingsFile()))
@@ -78,6 +84,19 @@ ipcMain.handle('screen:swipe', (_, device: Device, x1: number, y1: number, x2: n
 )
 ipcMain.handle('screen:key', (_, device: Device, code: 'BACK' | 'HOME' | 'APP_SWITCH' | 'POWER') => screenOf(device)?.key(code))
 ipcMain.handle('screen:text', (_, device: Device, value: string) => screenOf(device)?.text(value))
+ipcMain.handle('screen:touch', (_, device: Device, action: 'down' | 'move' | 'up' | 'cancel', pointerId: number, x: number, y: number) =>
+  screenOf(device)?.touch(action, pointerId, x, y),
+)
+ipcMain.handle('screen:scroll', (_, device: Device, x: number, y: number, dx: number, dy: number) =>
+  screenOf(device)?.scroll(x, y, dx, dy),
+)
+ipcMain.handle('screen:keyevent', (_, device: Device, event: KeyEvent) => screenOf(device)?.keyEvent(event))
+ipcMain.handle('screen:refresh', (_, device: Device) => screenOf(device)?.refresh())
+ipcMain.handle('screen:frames', (_, device: Device) => screenOf(device)?.useFrames())
+ipcMain.handle('screen:state', () => ({
+  capture: requireSession().screen?.mode ?? 'frames',
+  play: requireSession().play?.screen?.mode ?? 'frames',
+}))
 ipcMain.handle('apk:install', (_, paths: string[]) => requireSession().installApk(paths))
 ipcMain.handle('store:featured', () => requireSession().featuredApps())
 ipcMain.handle('store:search', (_, q: string) => requireSession().searchStore(q))
@@ -93,7 +112,7 @@ ipcMain.handle('usb:apps', (_, serial: string) => requireSession().usbApps(seria
 ipcMain.handle('usb:install', (_, serial: string, pkg: string) => requireSession().installFromUsb(serial, pkg))
 ipcMain.handle('apps:list', () => requireSession().packages())
 ipcMain.handle('app:launch', (_, pkg: string) => requireSession().launch(pkg))
-ipcMain.handle('sms:send', (_, from: string, text: string) => requireSession().sendSms(from, text))
+ipcMain.handle('sms:send', (_, device: Device, from: string, text: string) => requireSession().sendSms(device, from, text))
 ipcMain.handle('har:export', async () => {
   const s = requireSession()
   const target = await dialog.showSaveDialog({ defaultPath: `capture-${Date.now()}.har` })

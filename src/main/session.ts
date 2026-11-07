@@ -12,9 +12,9 @@ import { usbPhones, userApps } from './store/usb'
 import { Adb } from './adb'
 import { Logcat } from './logcat'
 import { CaptureProxy } from './proxy'
-import { Screen } from './screen'
+import { Mirror } from './mirror'
 import { findSdk, type Sdk } from './sdk'
-import type { LaunchResult, PhoneMode, Settings } from '../shared'
+import type { Device, LaunchResult, PhoneMode, Settings } from '../shared'
 
 export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'root' | 'device' | 'route' | 'trust' | 'ready'
 export interface Progress {
@@ -31,7 +31,7 @@ export class Session extends EventEmitter {
   emulator: RunningEmulator | null = null
   /** The phone being captured: the emulator, or the user's phone over USB. */
   device: Adb | null = null
-  screen: Screen | null = null
+  screen: Mirror | null = null
   logcat: Logcat | null = null
   /** USB mode: the phone whose proxy setting we changed, and the port, to undo on stop. */
   private routed: { adb: Adb; port: number } | null = null
@@ -80,9 +80,7 @@ export class Session extends EventEmitter {
     this.log(`Proxy listening on 127.0.0.1:${port}`)
     const adb = this.mode === 'usb' ? await this.startUsb(sdk, ca, port) : await this.startVirtual(sdk, ca, port)
     this.device = adb
-    this.screen = new Screen(adb)
-    this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
-    await this.screen.start()
+    await this.attachScreen(adb)
     this.logcat = new Logcat(adb)
     this.logcat.on('lines', (lines) => this.emit('logcat', lines))
     this.logcat.start()
@@ -123,13 +121,15 @@ export class Session extends EventEmitter {
     })
     await this.step('route', "Routing the phone's traffic through Sideglass", async () => {
       await adb.exec(['reverse', `tcp:${port}`, `tcp:${port}`])
-      await adb.shell(`settings put global http_proxy 127.0.0.1:${port}`)
+      // Record the route before the proxy setting, so a failure here is still undone on stop.
       this.routed = { adb, port }
+      await adb.shell(`settings put global http_proxy 127.0.0.1:${port}`)
       this.log("The phone's internet goes through Sideglass while it runs; quitting Sideglass puts it back.")
     })
     await this.step('trust', 'Copying the certificate to the phone', async () => {
       const local = join(this.dataDir, 'ca', 'sideglass-ca.crt')
       writeFileSync(local, ca.cert)
+      await adb.shell('mkdir -p /sdcard/Download').catch(() => undefined)
       await adb.exec(['push', local, '/sdcard/Download/sideglass-ca.crt'])
       this.log(
         'To see HTTPS contents for apps that allow it, install Download/sideglass-ca.crt on the phone: ' +
@@ -179,23 +179,42 @@ export class Session extends EventEmitter {
     say('This app checks its Google Play licence. Copying Google Play from the Play phone (first time only)…')
     const files = await pullPlayStore(await this.playHelper().start(), join(this.dataDir, 'playstore'))
     this.logcat?.stop()
-    await installPlayStore(adb, files, say)
-    await adb.root()
-    await this.trust(adb, this.ca!)
-    this.logcat = new Logcat(adb)
-    this.logcat.on('lines', (lines) => this.emit('logcat', lines))
-    this.logcat.start()
+    this.screen?.stop()
+    try {
+      await installPlayStore(adb, files, say)
+      await adb.root()
+      await this.trust(adb, this.ca!)
+    } finally {
+      this.logcat = new Logcat(adb)
+      this.logcat.on('lines', (lines) => this.emit('logcat', lines))
+      this.logcat.start()
+      await this.attachScreen(adb)
+    }
     say('Google Play is on the capture phone.')
   }
 
   private playHelper(): PlayHelper {
     if (!this.play) {
-      this.play = new PlayHelper(this.sdk!)
+      this.play = new PlayHelper(this.sdk!, join(this.dataDir, 'scrcpy'))
       this.play.on('log', (l) => this.emit('store-log', l))
       this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
+      this.play.on('video', (packet) => this.emit('play-video', packet))
+      this.play.on('screen-mode', (mode) => this.emit('play-screen-mode', mode))
       this.play.on('stage', (st) => this.emit('play-stage', st))
     }
     return this.play
+  }
+
+  /** The scrcpy server dies across a reboot, so the picture has to be opened again. */
+  private async attachScreen(adb: Adb): Promise<void> {
+    this.screen?.stop()
+    const screen = new Mirror(adb, join(this.dataDir, 'scrcpy'), 1)
+    screen.on('frame', (png: Buffer) => this.emit('frame', png))
+    screen.on('video', (packet) => this.emit('video', packet))
+    screen.on('mode', (mode) => this.emit('screen-mode', mode))
+    screen.on('log', (line: string) => this.log(line))
+    this.screen = screen
+    await screen.start()
   }
 
   play: PlayHelper | null = null
@@ -291,14 +310,16 @@ export class Session extends EventEmitter {
         message = `${pkg} checks its Google Play licence: sign in to Google Play on this phone with the account that has the app.`
       }
     }
-    // Start the launcher activity directly: `monkey` aborts if any other process crashes meanwhile.
-    const resolved = await adb.shell(`cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER ${pkg}`)
+    // `monkey` aborts when any other process crashes, which the emulator's Bluetooth stack does after a reboot.
+    const resolved = await adb.shell(
+      `cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER ${pkg}`,
+    )
     const component = resolved.trim().split('\n').pop()?.trim() ?? ''
     if (!component.startsWith(`${pkg}/`)) throw new Error(`${pkg} has no launcher activity`)
     await adb.shell(`am force-stop ${pkg}`)
     await adb.shell(`am start -n '${component}'`)
     await new Promise((r) => setTimeout(r, 1500))
-    return { pid: await this.pidOf(pkg), message }
+    return { device: 'capture', pid: await this.pidOf(pkg), message }
   }
 
   async pidOf(pkg: string): Promise<number | null> {
@@ -306,9 +327,11 @@ export class Session extends EventEmitter {
     return out ? Number(out.split(/\s+/)[0]) : null
   }
 
-  async sendSms(from: string, text: string): Promise<void> {
+  async sendSms(device: Device, from: string, text: string): Promise<void> {
     if (this.mode !== 'virtual') throw new Error('Test SMS only works on the virtual phone')
-    await this.requireAdb().exec(['emu', 'sms', 'send', from, text])
+    const adb = device === 'play' ? this.play?.emulator?.adb : this.requireAdb()
+    if (!adb) throw new Error(device === 'play' ? 'The Play phone is not running' : 'No device yet')
+    await adb.exec(['emu', 'sms', 'send', from, text])
   }
 
   private requireAdb() {
@@ -325,6 +348,7 @@ export class Session extends EventEmitter {
       const { adb, port } = this.routed
       this.routed = null
       await adb.shell('settings put global http_proxy :0').catch(() => undefined)
+      await adb.shell('settings delete global http_proxy').catch(() => undefined)
       await adb.exec(['reverse', '--remove', `tcp:${port}`]).catch(() => undefined)
     }
     if (this.emulator) await stopEmulator(this.emulator)
