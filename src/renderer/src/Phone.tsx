@@ -13,7 +13,7 @@ export function Phone({
   mode: PhoneMode
   activeDevice: Device
   onActiveDevice: (device: Device) => void
-  onLaunched: (pid: number | null) => void
+  onLaunched: (pid: number | null, pkg?: string) => void
 }) {
   const [adding, setAdding] = useState(false)
   const [apps, setApps] = useState<string[]>([])
@@ -28,7 +28,7 @@ export function Phone({
   const showLaunch = (pkg: string, result: LaunchResult, idle: string) => {
     onActiveDevice(result.device)
     // Logcat is the capture phone. A Play-phone pid would filter it to the wrong process.
-    onLaunched(result.device === 'capture' ? result.pid : null)
+    onLaunched(result.device === 'capture' ? result.pid : null, pkg)
     setStatus(result.message ?? (result.pid ? `${pkg} running (pid ${result.pid})` : idle))
   }
 

@@ -21,8 +21,11 @@ left; the phone is on the right, and you click and drag on it to use it.
   needed, creates the virtual phone, boots it with no window, gets root, and installs the
   CA as a system certificate (Android 14+ Conscrypt store included, in every app's mount
   namespace, so running apps pick it up without a restart).
-- **Requests:** method, status, host, path, size and time; request/response bodies (JSON
-  pretty-printed) and headers. A filter and a "hide Google system traffic" switch.
+- **Requests:** method, status, app, host, path, size and time; request/response bodies (JSON
+  pretty-printed, protobuf and gRPC as a field tree) and headers. A filter, an app filter, and a
+  "hide Google system traffic" switch.
+- **Timeline:** each tap, swipe, key and typed text, opened to the requests that followed within
+  two seconds. Export HAR keeps that timeline in `_sideglass`.
 - **Refused TLS:** hosts that rejected our certificate, which usually means certificate
   pinning.
 - **Phone:** live H.264 video; press, drag, long-press, scroll, and type with the keyboard.
@@ -79,15 +82,13 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 - Apps that pin certificates refuse the proxy (listed under Refused TLS). Bypassing that
   with Frida is planned.
 - Apps that detect root or emulators may refuse to run.
-- gRPC and protobuf bodies show as binary for now.
-- Requests are not yet tied to the app that made them.
+- On the virtual phone, a request is tagged with the app that owned the socket when that can be told apart. USB phones are not tagged.
+- gRPC and protobuf bodies are shown as a field tree without a schema. A `.proto` file cannot be loaded yet.
 
 ## Roadmap
 
 1. Frida: certificate unpinning for chosen apps
-2. Per-app request attribution
-3. Timeline linking taps to the requests that follow
-4. gRPC and protobuf decoding
+2. Persist sessions, replay a request, and a downloadable release
 
 ## License
 

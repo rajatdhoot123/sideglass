@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import * as mockttp from 'mockttp'
 import type { CaFiles } from './certificate'
+import { presentBody } from './protobody'
 
 /** One HTTP exchange as the UI shows it. Bodies are kept as text when they decode as UTF-8. */
 export interface Exchange {
@@ -22,6 +23,10 @@ export interface Exchange {
   durationMs?: number
   state: 'pending' | 'done' | 'aborted'
   contentType?: string
+  /** Package that owned the socket, when the phone's TCP table could say. */
+  app?: string
+  /** Input this request followed, when it started within two seconds. */
+  inputId?: string
 }
 
 /** A TLS handshake the app refused: usually certificate pinning. */
@@ -34,19 +39,14 @@ export interface TlsFailure {
 
 export type ExchangeSummary = Omit<Exchange, 'requestHeaders' | 'requestBody' | 'responseHeaders' | 'responseBody'>
 
-const MAX_BODY = 2 * 1024 * 1024
 const MAX_EXCHANGES = 5000
 
-async function bodyText(body: { getDecodedBuffer(): Promise<Buffer | undefined>; buffer: Buffer }): Promise<{ text?: string; size: number }> {
+async function bodyText(
+  body: { getDecodedBuffer(): Promise<Buffer | undefined>; buffer: Buffer },
+  contentType: string,
+): Promise<{ text?: string; size: number }> {
   const decoded = (await body.getDecodedBuffer().catch(() => undefined)) ?? body.buffer
-  const size = decoded.length
-  if (size === 0) return { size }
-  if (size > MAX_BODY) return { text: `<${size} bytes, too large to show>`, size }
-  const text = decoded.toString('utf8')
-  // Mostly-printable means text; otherwise show it as binary.
-  const bad = text.match(/[\u0000-\u0008\u000e-\u001f\ufffd]/g)?.length ?? 0
-  if (bad > text.length * 0.05) return { text: `<binary, ${size} bytes>`, size }
-  return { text, size }
+  return presentBody(decoded, contentType)
 }
 
 export function summarize(e: Exchange): ExchangeSummary {
@@ -62,6 +62,10 @@ export class CaptureProxy extends EventEmitter {
   private server: mockttp.Mockttp | null = null
   readonly exchanges = new Map<string, Exchange>()
   readonly tlsFailures: TlsFailure[] = []
+  /** Package for a request host, filled in after the phone's socket table is checked. */
+  lookupApp?: (host: string, port: number) => Promise<string | undefined>
+  /** Input id for a request that started at this time. */
+  inputFor?: (at: number) => string | undefined
 
   get port(): number {
     if (!this.server) throw new Error('proxy not started')
@@ -80,8 +84,9 @@ export class CaptureProxy extends EventEmitter {
     await server.forAnyWebSocket().thenPassThrough()
 
     await server.on('request', async (req) => {
-      const body = await bodyText(req.body)
       const url = new URL(req.url)
+      const type = String(req.headers['content-type'] ?? '')
+      const body = await bodyText(req.body, type)
       const e: Exchange = {
         id: req.id,
         startedAt: req.timingEvents.startTime,
@@ -94,15 +99,18 @@ export class CaptureProxy extends EventEmitter {
         requestBody: body.text,
         requestBodySize: body.size,
         state: 'pending',
+        inputId: this.inputFor?.(req.timingEvents.startTime),
       }
       this.exchanges.set(e.id, e)
       this.trim()
       this.emit('exchange', summarize(e))
+      const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80)
+      void this.tagApp(e, url.hostname, port)
     })
     await server.on('response', async (res) => {
       const e = this.exchanges.get(res.id)
       if (!e) return
-      const body = await bodyText(res.body)
+      const body = await bodyText(res.body, String(res.headers['content-type'] ?? ''))
       e.status = res.statusCode
       e.statusMessage = res.statusMessage
       e.responseHeaders = res.headers
@@ -134,6 +142,19 @@ export class CaptureProxy extends EventEmitter {
   clear(): void {
     this.exchanges.clear()
     this.tlsFailures.length = 0
+  }
+
+  /** Ask again once: the socket poll can land a moment after the request. */
+  private async tagApp(e: Exchange, host: string, port: number): Promise<void> {
+    if (!this.lookupApp) return
+    let app = await this.lookupApp(host, port).catch(() => undefined)
+    if (!app) {
+      await new Promise((r) => setTimeout(r, 400))
+      app = await this.lookupApp(host, port).catch(() => undefined)
+    }
+    if (!app || e.app || !this.exchanges.has(e.id)) return
+    e.app = app
+    this.emit('exchange', summarize(e))
   }
 
   async stop(): Promise<void> {

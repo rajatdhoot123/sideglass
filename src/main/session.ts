@@ -10,6 +10,8 @@ import { FEATURED, installFromFdroid, search as searchFdroid } from './store/fdr
 import { packageFromPlayLink, PlayHelper } from './store/play'
 import { usbPhones, userApps } from './store/usb'
 import { Adb } from './adb'
+import { Attributor } from './attrib'
+import { Timeline } from './timeline'
 import { Logcat } from './logcat'
 import { CaptureProxy } from './proxy'
 import { Mirror } from './mirror'
@@ -26,6 +28,8 @@ export interface Progress {
 /** Everything one capture session needs, set up in order with progress for the UI. */
 export class Session extends EventEmitter {
   readonly proxy = new CaptureProxy()
+  readonly timeline = new Timeline()
+  private attrib: Attributor | null = null
   sdk: Sdk | null = null
   ca: CaFiles | null = null
   emulator: RunningEmulator | null = null
@@ -77,9 +81,16 @@ export class Session extends EventEmitter {
     const ca = await this.step('ca', 'Preparing local certificate', () => loadOrCreateCa(join(this.dataDir, 'ca')))
     this.ca = ca
     const port = await this.step('proxy', 'Starting capture proxy', () => this.proxy.start(ca, 8890))
+    this.proxy.inputFor = (at) => this.timeline.match(at)
     this.log(`Proxy listening on 127.0.0.1:${port}`)
     const adb = this.mode === 'usb' ? await this.startUsb(sdk, ca, port) : await this.startVirtual(sdk, ca, port)
     this.device = adb
+    if (this.mode === 'virtual') {
+      this.attrib = new Attributor(adb)
+      this.proxy.lookupApp = (host, port) => this.attrib!.lookup(host, port)
+      this.attrib.start()
+      this.log('Requests are tagged with the app that opened the socket.')
+    }
     await this.attachScreen(adb)
     this.logcat = new Logcat(adb)
     this.logcat.on('lines', (lines) => this.emit('logcat', lines))
@@ -316,6 +327,7 @@ export class Session extends EventEmitter {
     )
     const component = resolved.trim().split('\n').pop()?.trim() ?? ''
     if (!component.startsWith(`${pkg}/`)) throw new Error(`${pkg} has no launcher activity`)
+    if (this.attrib) this.attrib.preferPkg = pkg
     await adb.shell(`am force-stop ${pkg}`)
     await adb.shell(`am start -n '${component}'`)
     await new Promise((r) => setTimeout(r, 1500))
@@ -340,6 +352,8 @@ export class Session extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    this.attrib?.stop()
+    this.attrib = null
     this.screen?.stop()
     this.logcat?.stop()
     await this.play?.stop().catch(() => undefined)

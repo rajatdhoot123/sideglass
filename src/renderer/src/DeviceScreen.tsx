@@ -82,6 +82,7 @@ export function DeviceScreen({ device, className }: { device: Device; className?
       configured = false
     })
     let last: string | null = null
+    shots.set(device, () => snapshot(canvasRef.current, imgRef.current, liveRef.current))
     const offFrame = window.api.on('frame', (from, png) => {
       if (from !== device || liveRef.current) return
       const url = URL.createObjectURL(new Blob([png.slice()], { type: 'image/png' }))
@@ -100,12 +101,13 @@ export function DeviceScreen({ device, className }: { device: Device; className?
       event.preventDefault()
       const point = fraction(canvas, event.clientX, event.clientY)
       const scale = event.deltaMode === 1 ? 100 : event.deltaMode === 2 ? 800 : 1
-      void window.api.scroll(device, point.x, point.y, event.deltaX * scale, event.deltaY * scale)
+      void withShot(device, window.api.scroll(device, point.x, point.y, event.deltaX * scale, event.deltaY * scale))
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
 
     return () => {
       disposed = true
+      shots.delete(device)
       offVideo()
       offMode()
       offFrame()
@@ -155,7 +157,8 @@ export function DeviceScreen({ device, className }: { device: Device; className?
     const id = token(e)
     fingers.current.delete(e.pointerId)
     const point = fraction(e.currentTarget, e.clientX, e.clientY)
-    void window.api.touch(device, e.type === 'pointercancel' ? 'cancel' : 'up', id, point.x, point.y)
+    const action = e.type === 'pointercancel' ? 'cancel' : 'up'
+    void withShot(device, window.api.touch(device, action, id, point.x, point.y))
   }
 
   const onKey = (e: React.KeyboardEvent, action: 'down' | 'up') => {
@@ -170,7 +173,7 @@ export function DeviceScreen({ device, className }: { device: Device; className?
       ctrl: e.ctrlKey,
       meta: e.metaKey,
     }
-    void window.api.keyEvent(device, event)
+    void withShot(device, window.api.keyEvent(device, event))
   }
 
   const pointOf = (e: React.MouseEvent) => fraction(imgRef.current!, e.clientX, e.clientY)
@@ -202,8 +205,12 @@ export function DeviceScreen({ device, className }: { device: Device; className?
               down.current = null
               if (!start) return
               const end = pointOf(e)
-              if (Math.hypot(end.x - start.x, end.y - start.y) < 0.01) void window.api.tap(device, end.x, end.y)
-              else void window.api.swipe(device, start.x, start.y, end.x, end.y, Date.now() - start.t)
+              void withShot(
+                device,
+                Math.hypot(end.x - start.x, end.y - start.y) < 0.01
+                  ? window.api.tap(device, end.x, end.y)
+                  : window.api.swipe(device, start.x, start.y, end.x, end.y, Date.now() - start.t),
+              )
             }}
           />
         ) : (
@@ -216,9 +223,37 @@ export function DeviceScreen({ device, className }: { device: Device; className?
 function webGlRenderer(canvas: HTMLCanvasElement): WebGLVideoFrameRenderer | BitmapVideoFrameRenderer {
   if (!WebGLVideoFrameRenderer.isSupported) return new BitmapVideoFrameRenderer(canvas)
   try {
-    return new WebGLVideoFrameRenderer(canvas)
+    return new WebGLVideoFrameRenderer(canvas, true)
   } catch {
     return new BitmapVideoFrameRenderer(canvas)
+  }
+}
+
+const shots = new Map<Device, () => string | null>()
+
+function withShot(device: Device, work: Promise<string | null>): Promise<void> {
+  return work.then((id) => {
+    const shot = id ? shots.get(device)?.() : null
+    return id && shot ? window.api.inputShot(id, shot) : undefined
+  })
+}
+
+function snapshot(canvas: HTMLCanvasElement | null, img: HTMLImageElement | null, live: boolean): string | null {
+  try {
+    const useCanvas = live && !!canvas && canvas.width > 2 && canvas.height > 2
+    const useImg = !!img && img.naturalWidth > 2
+    if (!useCanvas && !useImg) return null
+    const srcW = useCanvas ? canvas!.width : img!.naturalWidth
+    const srcH = useCanvas ? canvas!.height : img!.naturalHeight
+    const out = document.createElement('canvas')
+    out.width = 180
+    out.height = Math.max(1, Math.round((180 * srcH) / srcW))
+    const ctx = out.getContext('2d')
+    if (!ctx) return null
+    ctx.drawImage((useCanvas ? canvas : img) as CanvasImageSource, 0, 0, out.width, out.height)
+    return out.toDataURL('image/jpeg', 0.55)
+  } catch {
+    return null
   }
 }
 
@@ -233,9 +268,9 @@ function fraction(el: Element, clientX: number, clientY: number): { x: number; y
 export function NavKeys({ device }: { device: Device }) {
   return (
     <div className="navkeys">
-      <button title="Back" onClick={() => void window.api.key(device, 'BACK')}>◀</button>
-      <button title="Home" onClick={() => void window.api.key(device, 'HOME')}>●</button>
-      <button title="Recent apps" onClick={() => void window.api.key(device, 'APP_SWITCH')}>■</button>
+      <button title="Back" onClick={() => void withShot(device, window.api.key(device, 'BACK'))}>◀</button>
+      <button title="Home" onClick={() => void withShot(device, window.api.key(device, 'HOME'))}>●</button>
+      <button title="Recent apps" onClick={() => void withShot(device, window.api.key(device, 'APP_SWITCH'))}>■</button>
     </div>
   )
 }
@@ -247,7 +282,7 @@ export function TypeBar({ device }: { device: Device }) {
       className="typebar"
       onSubmit={(e) => {
         e.preventDefault()
-        if (typing) void window.api.text(device, typing)
+        if (typing) void withShot(device, window.api.text(device, typing))
         setTyping('')
       }}
     >

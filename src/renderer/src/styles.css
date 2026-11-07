@@ -63,7 +63,7 @@ button:hover { border-color: var(--accent); }
 .requests, .logs { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .table { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .rows { overflow: auto; flex: 1; }
-.row { display: grid; grid-template-columns: 70px 60px 60px 200px 1fr 70px 70px; gap: 8px; padding: 3px 8px; white-space: nowrap; cursor: default; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.row { display: grid; grid-template-columns: 72px 58px 52px 110px minmax(110px, 180px) minmax(80px, 1fr) 64px 58px; gap: 8px; padding: 3px 8px; white-space: nowrap; cursor: default; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 .row span { overflow: hidden; text-overflow: ellipsis; }
 .row.head { color: var(--muted); border-bottom: 1px solid var(--line); font-family: inherit; }
 .row:not(.head):hover { background: var(--hover); }
@@ -110,7 +110,7 @@ h4 { margin: 10px 0 4px; color: var(--muted); font-weight: 500; }
 @keyframes pulse { 50% { opacity: 0.3; } }
 @media (max-width: 760px) {
   .app { grid-template-columns: minmax(0, 1fr) minmax(260px, 40vw); }
-  .row { grid-template-columns: 64px 52px 52px minmax(110px, 170px) minmax(120px, 1fr) 60px 60px; }
+  .row { grid-template-columns: 64px 48px 44px 72px minmax(80px, 120px) minmax(70px, 1fr) 48px 48px; }
 }
 button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
 button:disabled { opacity: 0.5; cursor: default; }
@@ -145,6 +145,14 @@ button:disabled { opacity: 0.5; cursor: default; }
 .choice-usb { display: flex; gap: 6px; align-items: center; }
 .choice-usb select { flex: 1; min-width: 0; }
 .choice-actions { display: flex; justify-content: flex-end; }
+.timeline { overflow: auto; flex: 1; min-height: 0; }
+.tl-item { border-bottom: 1px solid var(--line); }
+.tl-head { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; border: 0; border-radius: 0; background: transparent; padding: 8px; }
+.tl-head img { width: 54px; height: auto; border-radius: 6px; border: 1px solid var(--line); flex: none; }
+.tl-label { display: flex; flex-direction: column; min-width: 0; }
+.tl-label b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-reqs { margin: 0; padding: 0 12px 10px 74px; list-style: none; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.tl-reqs li { padding: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .setup-actions { display: flex; gap: 8px; }
 .modal.settings { height: auto; max-height: 80vh; }
 .modal.settings .modal-body { padding: 0 12px 12px; }

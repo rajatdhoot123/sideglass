@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('api', {
   touch: invoke('screen:touch'),
   scroll: invoke('screen:scroll'),
   keyEvent: invoke('screen:keyevent'),
+  inputShot: invoke('input:shot'),
   refreshVideo: invoke('screen:refresh'),
   useFrames: invoke('screen:frames'),
   screenState: invoke('screen:state'),
