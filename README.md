@@ -28,6 +28,9 @@ left; the phone is on the right, and you click and drag on it to use it.
   - **From my phone:** pick an app on a USB-connected phone (USB debugging on) to copy it over.
   - **APK file:** drop APKs on the phone (split APKs together).
 - **Launch** an installed app from the list.
+- Apps that declare Google Play licensing, including PairIP-protected apps, run on the Play
+  phone where their Play Store license can be checked. Their traffic bypasses Sideglass's
+  capture proxy; apps without this requirement run on the capture phone as usual.
 - **Logs:** logcat, filtered to the launched app.
 - **Test SMS:** send an SMS from any sender to the phone.
 - **Export HAR** for Chrome DevTools, Charles, Insomnia and the like.
@@ -62,6 +65,8 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 - Google Play system images cannot be rooted, so the capture phone has no Play Store; the
   separate Play phone downloads apps for it. Paid apps and apps Google does not offer on that
   phone cannot be fetched.
+- Apps that require a Google Play license must be installed from Play Store on the Play phone
+  and run there. Their requests are not captured by Sideglass.
 - Apps that pin certificates refuse the proxy (listed under Refused TLS). Bypassing that
   with Frida is planned.
 - Apps that detect root or emulators may refuse to run.

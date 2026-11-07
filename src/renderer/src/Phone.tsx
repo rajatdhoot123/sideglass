@@ -1,9 +1,18 @@
 import { useEffect, useState } from 'react'
+import type { Device } from '../../shared'
 import { AddApp } from './AddApp'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
 
 /** The live phone: frames from the device; clicks and drags become taps and swipes. */
-export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void }) {
+export function Phone({
+  activeDevice,
+  onActiveDevice,
+  onLaunched,
+}: {
+  activeDevice: Device
+  onActiveDevice: (device: Device) => void
+  onLaunched: (pid: number | null) => void
+}) {
   const [adding, setAdding] = useState(false)
   const [apps, setApps] = useState<string[]>([])
   const [status, setStatus] = useState('')
@@ -45,9 +54,14 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
           onChange={async (e) => {
             if (!e.target.value) return
             setStatus(`Starting ${e.target.value}…`)
-            const pid = await window.api.launch(e.target.value)
-            onLaunched(pid)
-            setStatus(pid ? `${e.target.value} running (pid ${pid})` : `${e.target.value} did not start`)
+            try {
+              const result = await window.api.launch(e.target.value)
+              onActiveDevice(result.device)
+              onLaunched(result.pid)
+              setStatus(result.message ?? (result.pid ? `${e.target.value} running (pid ${result.pid})` : `${e.target.value} did not start`))
+            } catch (error) {
+              setStatus(`Could not start ${e.target.value}: ${(error as Error).message}`)
+            }
           }}
         >
           <option value="">Launch app…</option>
@@ -66,18 +80,23 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
           onInstalled={async (pkg, open) => {
             setApps(await window.api.apps())
             if (!pkg || !open) return
-            // Hand back to the capture phone: close the dialog and open the new app.
+            // Close the dialog and open the app on the device that can run it.
             setAdding(false)
             setStatus(`Starting ${pkg}…`)
-            const pid = await window.api.launch(pkg)
-            onLaunched(pid)
-            setStatus(pid ? `${pkg} running (pid ${pid})` : `${pkg} installed; it did not start by itself`)
+            try {
+              const result = await window.api.launch(pkg)
+              onActiveDevice(result.device)
+              onLaunched(result.pid)
+              setStatus(result.message ?? (result.pid ? `${pkg} running (pid ${result.pid})` : `${pkg} installed; it did not start by itself`))
+            } catch (error) {
+              setStatus(`Could not start ${pkg}: ${(error as Error).message}`)
+            }
           }}
         />
       )}
-      <DeviceScreen device="capture" />
-      <NavKeys device="capture" />
-      <TypeBar device="capture" />
+      <DeviceScreen device={activeDevice} />
+      <NavKeys device={activeDevice} />
+      <TypeBar device={activeDevice} />
       <details className="sms">
         <summary>Send a test SMS</summary>
         <input value={smsFrom} onChange={(e) => setSmsFrom(e.target.value)} />
