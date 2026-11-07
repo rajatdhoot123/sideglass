@@ -19,7 +19,7 @@ export async function loadOrCreateCa(dir: string): Promise<CaFiles> {
   const certPath = join(dir, 'ca.pem')
   if (!existsSync(keyPath) || !existsSync(certPath)) {
     const ca = await generateCACertificate({
-      subject: { commonName: 'build-with-me local CA (do not trust elsewhere)', organizationName: 'build-with-me' },
+      subject: { commonName: 'sideglass local CA (do not trust elsewhere)', organizationName: 'sideglass' },
     })
     writeFileSync(keyPath, ca.key, { mode: 0o600 })
     writeFileSync(certPath, ca.cert)
@@ -43,22 +43,22 @@ export function subjectHashOld(pem: string): string {
  */
 export async function installSystemCa(adb: Adb, ca: CaFiles): Promise<void> {
   const remotePem = `/data/local/tmp/${ca.androidName}`
-  const script = '/data/local/tmp/build-with-me-ca.sh'
-  const local = join(process.env.TMPDIR ?? '/tmp', `bwm-${ca.androidName}`)
+  const script = '/data/local/tmp/sideglass-ca.sh'
+  const local = join(process.env.TMPDIR ?? '/tmp', `sideglass-${ca.androidName}`)
   writeFileSync(local, ca.cert)
   await adb.exec(['push', local, remotePem])
-  const scriptLocal = join(process.env.TMPDIR ?? '/tmp', 'build-with-me-ca.sh')
+  const scriptLocal = join(process.env.TMPDIR ?? '/tmp', 'sideglass-ca.sh')
   writeFileSync(scriptLocal, caScript(ca.androidName))
   await adb.exec(['push', scriptLocal, script])
   const out = await adb.shell(`sh ${script}`, 60_000)
-  if (!out.includes('BWM_CA_OK')) throw new Error(`CA install failed:\n${out}`)
+  if (!out.includes('SIDEGLASS_CA_OK')) throw new Error(`CA install failed:\n${out}`)
 }
 
 export function caScript(name: string): string {
   return `#!/system/bin/sh
 NAME=${name}
 PEM=/data/local/tmp/$NAME
-WORK=/data/local/tmp/bwm-cacerts
+WORK=/data/local/tmp/sideglass-cacerts
 APEX=/apex/com.android.conscrypt/cacerts
 SYS=/system/etc/security/cacerts
 
@@ -89,6 +89,6 @@ if [ -d "$APEX" ]; then
   done
 fi
 
-[ -f "$SYS/$NAME" ] && echo BWM_CA_OK
+[ -f "$SYS/$NAME" ] && echo SIDEGLASS_CA_OK
 `
 }

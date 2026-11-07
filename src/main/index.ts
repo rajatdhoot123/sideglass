@@ -17,7 +17,7 @@ function createWindow(): void {
     height: 940,
     minWidth: 1000,
     minHeight: 640,
-    title: 'build-with-me',
+    title: 'Sideglass',
     backgroundColor: '#0f1115',
     webPreferences: { preload: join(__dirname, '../preload/index.js'), sandbox: false, contextIsolation: true },
   })
@@ -75,8 +75,8 @@ ipcMain.handle('har:export', async () => {
 
 app.whenReady().then(() => {
   createWindow()
-  // Debug aid: BWM_SNAPSHOT=/path/file.png saves the window every 3 s (for screenshots in tests and docs).
-  const snapshot = process.env.BWM_SNAPSHOT
+  // Debug aid: SIDEGLASS_SNAPSHOT=/path/file.png saves the window every 3 s (for screenshots in tests and docs).
+  const snapshot = process.env.SIDEGLASS_SNAPSHOT
   if (snapshot) {
     setInterval(async () => {
       if (!window || window.isDestroyed()) return

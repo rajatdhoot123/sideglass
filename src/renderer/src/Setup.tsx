@@ -14,7 +14,7 @@ export function Setup({ progress, log, onRetry }: { progress: Record<string, Pro
   const failed = Object.values(progress).find((p) => p.state === 'failed')
   return (
     <div className="setup">
-      <h1>build-with-me</h1>
+      <h1>Sideglass</h1>
       <p className="muted">Setting up a private virtual phone that shows every API call its apps make.</p>
       <ol className="steps">
         {STEPS.map(([id, label]) => {

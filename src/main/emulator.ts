@@ -8,7 +8,7 @@ import type { Sdk } from './sdk'
 
 const run = promisify(execFile)
 
-export const AVD_NAME = 'build_with_me_api35'
+export const AVD_NAME = 'sideglass_api35'
 export const API_LEVEL = 35
 /** Google APIs images are userdebug builds: adb root works. Google Play images cannot be rooted. */
 export const IMAGE_ABI = arch() === 'arm64' ? 'arm64-v8a' : 'x86_64'

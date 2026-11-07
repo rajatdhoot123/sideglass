@@ -20,7 +20,7 @@ export function candidateRoots(): string[] {
   return [
     process.env.ANDROID_HOME,
     process.env.ANDROID_SDK_ROOT,
-    join(home, '.build-with-me', 'android-sdk'),
+    join(home, '.sideglass', 'android-sdk'),
     join(home, 'Library', 'Android', 'sdk'),
     '/opt/homebrew/share/android-commandlinetools',
     '/usr/local/share/android-commandlinetools',

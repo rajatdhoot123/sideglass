@@ -1,4 +1,4 @@
-# build-with-me
+# Sideglass
 
 See every API call an Android app makes, next to the live phone.
 
@@ -37,7 +37,7 @@ npm run smoke      # headless check: boot, trust, open a page, expect it capture
 ```
 
 The first run downloads the `system-images;android-35;google_apis;<abi>` image (~1.5 GB)
-and creates an AVD named `build_with_me_api35`, on port 5590.
+and creates an AVD named `sideglass_api35`, on port 5590.
 
 ## How it works
 

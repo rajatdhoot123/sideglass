@@ -1,5 +1,5 @@
 {
-  "name": "build-with-me",
+  "name": "sideglass",
   "version": "0.1.0",
   "description": "See every API call an Android app makes, next to the live phone.",
   "main": "./out/main/index.js",

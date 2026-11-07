@@ -12,7 +12,7 @@ export function toHar(exchanges: Exchange[]): object {
   return {
     log: {
       version: '1.2',
-      creator: { name: 'build-with-me', version: '0.1.0' },
+      creator: { name: 'sideglass', version: '0.1.0' },
       entries: exchanges.map((e) => {
         const url = new URL(e.url)
         return {

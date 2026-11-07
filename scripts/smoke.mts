@@ -14,7 +14,7 @@ await session.start()
 let frames = 0
 session.on('frame', () => frames++)
 const adb = session.emulator!.adb
-await adb.shell('am start -a android.intent.action.VIEW -d https://example.com/?from=build-with-me')
+await adb.shell('am start -a android.intent.action.VIEW -d https://example.com/?from=sideglass')
 await new Promise((r) => setTimeout(r, 25_000))
 const all = [...session.proxy.exchanges.values()]
 console.log(`\nCaptured ${all.length} requests, ${session.proxy.tlsFailures.length} TLS refusals, ${frames} screen frames`)
