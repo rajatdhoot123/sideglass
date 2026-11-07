@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { Device } from '../../shared'
+import type { Device, LaunchResult } from '../../shared'
 import { AddApp } from './AddApp'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
 
@@ -20,6 +20,13 @@ export function Phone({
   const [smsText, setSmsText] = useState('Rs.500.00 debited from A/c XX1234 on 07-11-26 to ZOMATO. UPI Ref 512345678901')
   const [dragging, setDragging] = useState(false)
   useEffect(() => void window.api.apps().then(setApps), [])
+
+  const showLaunch = (pkg: string, result: LaunchResult, idle: string) => {
+    onActiveDevice(result.device)
+    // Logcat is the capture phone. A Play-phone pid would filter it to the wrong process.
+    onLaunched(result.device === 'capture' ? result.pid : null)
+    setStatus(result.message ?? (result.pid ? `${pkg} running (pid ${result.pid})` : idle))
+  }
 
   const install = async (files: FileList) => {
     const paths = [...files].map((f) => window.api.pathForFile(f)).filter((p) => p.endsWith('.apk'))
@@ -55,10 +62,7 @@ export function Phone({
             if (!e.target.value) return
             setStatus(`Starting ${e.target.value}…`)
             try {
-              const result = await window.api.launch(e.target.value)
-              onActiveDevice(result.device)
-              onLaunched(result.pid)
-              setStatus(result.message ?? (result.pid ? `${e.target.value} running (pid ${result.pid})` : `${e.target.value} did not start`))
+              showLaunch(e.target.value, await window.api.launch(e.target.value), `${e.target.value} did not start`)
             } catch (error) {
               setStatus(`Could not start ${e.target.value}: ${(error as Error).message}`)
             }
@@ -70,6 +74,17 @@ export function Phone({
           ))}
         </select>
         <button onClick={() => void window.api.apps().then(setApps)}>↻</button>
+        {activeDevice === 'play' && (
+          <button
+            onClick={() => {
+              onActiveDevice('capture')
+              onLaunched(null)
+              setStatus('Showing the capture phone.')
+            }}
+          >
+            Capture phone
+          </button>
+        )}
         <button className="primary" onClick={() => setAdding(true)}>
           + Add app
         </button>
@@ -84,10 +99,7 @@ export function Phone({
             setAdding(false)
             setStatus(`Starting ${pkg}…`)
             try {
-              const result = await window.api.launch(pkg)
-              onActiveDevice(result.device)
-              onLaunched(result.pid)
-              setStatus(result.message ?? (result.pid ? `${pkg} running (pid ${result.pid})` : `${pkg} installed; it did not start by itself`))
+              showLaunch(pkg, await window.api.launch(pkg), `${pkg} installed; it did not start by itself`)
             } catch (error) {
               setStatus(`Could not start ${pkg}: ${(error as Error).message}`)
             }
@@ -98,7 +110,7 @@ export function Phone({
       <NavKeys device={activeDevice} />
       <TypeBar device={activeDevice} />
       <details className="sms">
-        <summary>Send a test SMS</summary>
+        <summary>{activeDevice === 'play' ? 'Send a test SMS to the capture phone' : 'Send a test SMS'}</summary>
         <input value={smsFrom} onChange={(e) => setSmsFrom(e.target.value)} />
         <textarea value={smsText} onChange={(e) => setSmsText(e.target.value)} rows={3} />
         <button onClick={() => void window.api.sendSms(smsFrom, smsText).then(() => setStatus('SMS sent'))}>Send</button>

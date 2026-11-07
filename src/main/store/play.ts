@@ -71,8 +71,8 @@ export class PlayHelper extends EventEmitter {
 
   async isInstalledFromPlay(pkg: string): Promise<boolean> {
     if (!this.emulator) return false
-    const out = await this.emulator.adb.shell(`dumpsys package ${pkg}`).catch(() => '')
-    return /installerPackageName=com\.android\.vending\b/.test(out)
+    const out = await this.emulator.adb.shell(`dumpsys package ${pkg}`)
+    return /(?:installerPackageName|initiatingPackageName|originatingPackageName)=com\.android\.vending\b/.test(out)
   }
 
   async launch(pkg: string): Promise<number | null> {
