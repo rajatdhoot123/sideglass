@@ -64,6 +64,7 @@ export class PlayHelper extends EventEmitter {
   emulator: RunningEmulator | null = null
   screen: Mirror | null = null
   private storeChecked = false
+  private starting: Promise<Adb> | null = null
 
   constructor(
     private readonly sdk: Sdk,
@@ -76,6 +77,13 @@ export class PlayHelper extends EventEmitter {
 
   async start(): Promise<Adb> {
     if (this.emulator && this.storeChecked) return this.emulator.adb
+    this.starting ??= this.openPlayPhone().finally(() => {
+      this.starting = null
+    })
+    return this.starting
+  }
+
+  private async openPlayPhone(): Promise<Adb> {
     if (!this.emulator) {
       await ensureAvd(this.sdk, PLAY_PHONE, this.log)
       this.emulator = await startEmulator(this.sdk, PLAY_PHONE, this.log)

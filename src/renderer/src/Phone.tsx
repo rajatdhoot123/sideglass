@@ -110,10 +110,19 @@ export function Phone({
       <NavKeys device={activeDevice} />
       <TypeBar device={activeDevice} />
       <details className="sms">
-        <summary>{activeDevice === 'play' ? 'Send a test SMS to the capture phone' : 'Send a test SMS'}</summary>
+        <summary>Send a test SMS to this phone</summary>
         <input value={smsFrom} onChange={(e) => setSmsFrom(e.target.value)} />
         <textarea value={smsText} onChange={(e) => setSmsText(e.target.value)} rows={3} />
-        <button onClick={() => void window.api.sendSms(smsFrom, smsText).then(() => setStatus('SMS sent'))}>Send</button>
+        <button
+          onClick={() =>
+            void window.api.sendSms(activeDevice, smsFrom, smsText).then(
+              () => setStatus('SMS sent'),
+              (error: Error) => setStatus(`SMS failed: ${error.message}`),
+            )
+          }
+        >
+          Send
+        </button>
       </details>
       <div className="status">{status || 'Drop an APK here to install it.'}</div>
     </section>

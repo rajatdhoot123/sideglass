@@ -12,7 +12,7 @@ import { Logcat } from './logcat'
 import { CaptureProxy } from './proxy'
 import { Mirror } from './mirror'
 import { findSdk, type Sdk } from './sdk'
-import type { LaunchResult } from '../shared'
+import type { Device, LaunchResult } from '../shared'
 
 export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'root' | 'trust' | 'ready'
 export interface Progress {
@@ -184,6 +184,9 @@ export class Session extends EventEmitter {
     const adb = this.requireAdb()
     const metadata = await adb.shell(`dumpsys package ${pkg}`).catch(() => '')
     if (/com\.android\.vending\.CHECK_LICENSE\b|com\.pairip\.licensecheck\./i.test(metadata)) {
+      if (this.playRunning) {
+        throw new Error(`Already getting ${this.playRunning} on the Play phone. Cancel it first.`)
+      }
       const play = this.playHelper()
       await play.start()
       if (!(await play.isInstalledFromPlay(pkg))) {
@@ -228,8 +231,10 @@ export class Session extends EventEmitter {
     return out ? Number(out.split(/\s+/)[0]) : null
   }
 
-  async sendSms(from: string, text: string): Promise<void> {
-    await this.requireAdb().exec(['emu', 'sms', 'send', from, text])
+  async sendSms(device: Device, from: string, text: string): Promise<void> {
+    const adb = device === 'play' ? this.play?.emulator?.adb : this.requireAdb()
+    if (!adb) throw new Error(device === 'play' ? 'The Play phone is not running' : 'No device yet')
+    await adb.exec(['emu', 'sms', 'send', from, text])
   }
 
   private requireAdb() {
