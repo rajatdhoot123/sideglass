@@ -6,6 +6,13 @@ import type { UsbPhone } from './main/store/usb'
 
 export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone }
 export type Device = 'capture' | 'play'
+/** Which phone Sideglass captures: its own rooted emulator, or the user's phone over USB. */
+export type PhoneMode = 'virtual' | 'usb'
+export interface Settings {
+  phone?: PhoneMode
+  /** For USB mode: the phone to use when more than one is connected. */
+  usbSerial?: string
+}
 export interface LaunchResult {
   pid: number | null
   /** Something the user has to do, shown instead of the usual status. */
@@ -15,6 +22,10 @@ export interface LaunchResult {
 /** What the window can ask the main process to do. */
 export interface Api {
   start(): Promise<void>
+  settings(): Promise<Settings>
+  /** Saves and stops the current session; call start() afterwards. */
+  saveSettings(settings: Settings): Promise<Settings>
+  openCertificateSettings(): Promise<void>
   getExchange(id: string): Promise<Exchange | null>
   clear(): Promise<void>
   tap(device: Device, x: number, y: number): Promise<void>

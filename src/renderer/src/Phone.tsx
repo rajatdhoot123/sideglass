@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
+import type { PhoneMode } from '../../shared'
 import { AddApp } from './AddApp'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
 
 /** The live phone: frames from the device; clicks and drags become taps and swipes. */
-export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void }) {
+export function Phone({ mode, onLaunched }: { mode: PhoneMode; onLaunched: (pid: number | null) => void }) {
   const [adding, setAdding] = useState(false)
   const [apps, setApps] = useState<string[]>([])
   const [status, setStatus] = useState('')
@@ -72,6 +73,7 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
       </div>
       {adding && (
         <AddApp
+          mode={mode}
           onClose={() => setAdding(false)}
           onInstalled={async (pkg, open) => {
             setApps(await window.api.apps())
@@ -85,12 +87,23 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
       <DeviceScreen device="capture" />
       <NavKeys device="capture" />
       <TypeBar device="capture" />
-      <details className="sms">
-        <summary>Send a test SMS</summary>
-        <input value={smsFrom} onChange={(e) => setSmsFrom(e.target.value)} />
-        <textarea value={smsText} onChange={(e) => setSmsText(e.target.value)} rows={3} />
-        <button onClick={() => void window.api.sendSms(smsFrom, smsText).then(() => setStatus('SMS sent'))}>Send</button>
-      </details>
+      {mode === 'usb' && (
+        <div className="cert-hint">
+          <span className="muted">
+            To see HTTPS contents for apps that allow it, install <code>Download/sideglass-ca.crt</code> on the phone as a
+            CA certificate.
+          </span>
+          <button onClick={() => void window.api.openCertificateSettings()}>Open phone settings</button>
+        </div>
+      )}
+      {mode === 'virtual' && (
+        <details className="sms">
+          <summary>Send a test SMS</summary>
+          <input value={smsFrom} onChange={(e) => setSmsFrom(e.target.value)} />
+          <textarea value={smsText} onChange={(e) => setSmsText(e.target.value)} rows={3} />
+          <button onClick={() => void window.api.sendSms(smsFrom, smsText).then(() => setStatus('SMS sent'))}>Send</button>
+        </details>
+      )}
       <div className="status">{status || 'Drop an APK here to install it.'}</div>
     </section>
   )

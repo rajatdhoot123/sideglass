@@ -109,3 +109,16 @@ button:disabled { opacity: 0.5; cursor: default; }
 .banner.needs-user { border-color: var(--warn); background: #2b2412; color: #ffe2a3; font-weight: 500; }
 .banner.installing, .banner.copying { border-color: var(--accent); }
 .banner.done { border-color: var(--ok); color: var(--ok); }
+.choice { display: flex; flex-direction: column; gap: 12px; }
+.choice-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.choice-card { text-align: left; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.choice-card.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.choice-card ul { margin: 0; padding-left: 18px; color: var(--muted); }
+.choice-usb { display: flex; gap: 6px; align-items: center; }
+.choice-usb select { flex: 1; min-width: 0; }
+.choice-actions { display: flex; justify-content: flex-end; }
+.setup-actions { display: flex; gap: 8px; }
+.modal.settings { height: auto; max-height: 80vh; }
+.modal.settings .modal-body { padding: 0 12px 12px; }
+.cert-hint { display: flex; gap: 8px; align-items: center; font-size: 11px; }
+.cert-hint button { flex: none; }

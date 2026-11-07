@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { writeFileSync } from 'node:fs'
 import { generateSPKIFingerprint } from 'mockttp'
 import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
@@ -13,9 +14,9 @@ import { Logcat } from './logcat'
 import { CaptureProxy } from './proxy'
 import { Screen } from './screen'
 import { findSdk, type Sdk } from './sdk'
-import type { LaunchResult } from '../shared'
+import type { LaunchResult, PhoneMode, Settings } from '../shared'
 
-export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'root' | 'trust' | 'ready'
+export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'root' | 'device' | 'route' | 'trust' | 'ready'
 export interface Progress {
   step: StepId
   state: 'running' | 'done' | 'failed'
@@ -28,11 +29,22 @@ export class Session extends EventEmitter {
   sdk: Sdk | null = null
   ca: CaFiles | null = null
   emulator: RunningEmulator | null = null
+  /** The phone being captured: the emulator, or the user's phone over USB. */
+  device: Adb | null = null
   screen: Screen | null = null
   logcat: Logcat | null = null
+  /** USB mode: the phone whose proxy setting we changed, and the port, to undo on stop. */
+  private routed: { adb: Adb; port: number } | null = null
 
-  constructor(private readonly dataDir: string) {
+  constructor(
+    private readonly dataDir: string,
+    private readonly settings: Settings,
+  ) {
     super()
+  }
+
+  get mode(): PhoneMode {
+    return this.settings.phone ?? 'virtual'
   }
 
   private progress(step: StepId, state: Progress['state'], message: string): void {
@@ -66,6 +78,18 @@ export class Session extends EventEmitter {
     this.ca = ca
     const port = await this.step('proxy', 'Starting capture proxy', () => this.proxy.start(ca, 8890))
     this.log(`Proxy listening on 127.0.0.1:${port}`)
+    const adb = this.mode === 'usb' ? await this.startUsb(sdk, ca, port) : await this.startVirtual(sdk, ca, port)
+    this.device = adb
+    this.screen = new Screen(adb)
+    this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
+    await this.screen.start()
+    this.logcat = new Logcat(adb)
+    this.logcat.on('lines', (lines) => this.emit('logcat', lines))
+    this.logcat.start()
+    this.progress('ready', 'done', 'Ready')
+  }
+
+  private async startVirtual(sdk: Sdk, ca: CaFiles, port: number): Promise<Adb> {
     await this.step('avd', 'Preparing virtual phone', () => ensureAvd(sdk, CAPTURE_PHONE, this.log))
     const emu = await this.step('boot', 'Booting virtual phone', () => startEmulator(sdk, CAPTURE_PHONE, this.log, port))
     this.emulator = emu
@@ -74,13 +98,50 @@ export class Session extends EventEmitter {
       await this.trust(emu.adb, ca)
       this.log(`Android API ${await sdkVersion(emu.adb)}: CA ${ca.androidName} trusted`)
     })
-    this.screen = new Screen(emu.adb)
-    this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
-    await this.screen.start()
-    this.logcat = new Logcat(emu.adb)
-    this.logcat.on('lines', (lines) => this.emit('logcat', lines))
-    this.logcat.start()
-    this.progress('ready', 'done', 'Ready')
+    return emu.adb
+  }
+
+  /**
+   * The user's own phone, no root needed. Its traffic goes over the USB cable to the proxy
+   * (adb reverse + the global HTTP proxy setting). Without root our CA can only be a user CA,
+   * so HTTPS contents show only for apps that trust user CAs (Chrome, debug builds that opt in);
+   * the rest appear under Refused TLS with their host names.
+   */
+  private async startUsb(sdk: Sdk, ca: CaFiles, port: number): Promise<Adb> {
+    const adb = await this.step('device', 'Finding your phone', async () => {
+      const phones = await usbPhones(sdk.adb)
+      if (!phones.length) {
+        throw new Error(
+          'No phone found. Connect it with a USB cable, turn on USB debugging (Settings → Developer options) and allow this computer on the phone.',
+        )
+      }
+      const wanted = this.settings.usbSerial
+      const phone = phones.find((p) => p.serial === wanted) ?? phones[0]
+      if (wanted && phone.serial !== wanted) this.log(`${wanted} is not connected; using ${phone.model} instead`)
+      this.log(`Using ${phone.model} (${phone.serial})`)
+      return new Adb(sdk.adb, phone.serial)
+    })
+    await this.step('route', "Routing the phone's traffic through Sideglass", async () => {
+      await adb.exec(['reverse', `tcp:${port}`, `tcp:${port}`])
+      await adb.shell(`settings put global http_proxy 127.0.0.1:${port}`)
+      this.routed = { adb, port }
+      this.log("The phone's internet goes through Sideglass while it runs; quitting Sideglass puts it back.")
+    })
+    await this.step('trust', 'Copying the certificate to the phone', async () => {
+      const local = join(this.dataDir, 'ca', 'sideglass-ca.crt')
+      writeFileSync(local, ca.cert)
+      await adb.exec(['push', local, '/sdcard/Download/sideglass-ca.crt'])
+      this.log(
+        'To see HTTPS contents for apps that allow it, install Download/sideglass-ca.crt on the phone: ' +
+          'Settings → Security → Encryption & credentials → Install a certificate → CA certificate.',
+      )
+    })
+    return adb
+  }
+
+  /** USB mode: open the phone's security settings, where the user installs our CA. */
+  async openCertificateSettings(): Promise<void> {
+    await this.requireAdb().shell('am start -a android.settings.SECURITY_SETTINGS')
   }
 
   /** Trust our CA in the system store and in Chrome. Needed after every boot (the CA mount is tmpfs). */
@@ -196,10 +257,6 @@ export class Session extends EventEmitter {
     this.playCancelled = true
   }
 
-  usbPhones() {
-    return usbPhones(this.sdk!.adb)
-  }
-
   usbApps(serial: string) {
     return userApps(new Adb(this.sdk!.adb, serial))
   }
@@ -226,7 +283,8 @@ export class Session extends EventEmitter {
     if (!isPackageName(pkg)) throw new Error(`Invalid package name: ${pkg}`)
     const adb = this.requireAdb()
     let message: string | undefined
-    if (needsPlayLicense(await adb.shell(`dumpsys package ${pkg}`).catch(() => ''))) {
+    // A real phone has Google Play already; only the virtual phone needs it put in.
+    if (this.mode === 'virtual' && needsPlayLicense(await adb.shell(`dumpsys package ${pkg}`).catch(() => ''))) {
       await this.ensurePlayStore()
       const account = /Account \{name=[^,]+, type=com\.google\}/.test(await adb.shell('dumpsys account').catch(() => ''))
       if (!account) {
@@ -249,18 +307,26 @@ export class Session extends EventEmitter {
   }
 
   async sendSms(from: string, text: string): Promise<void> {
+    if (this.mode !== 'virtual') throw new Error('Test SMS only works on the virtual phone')
     await this.requireAdb().exec(['emu', 'sms', 'send', from, text])
   }
 
   private requireAdb() {
-    if (!this.emulator) throw new Error('No device yet')
-    return this.emulator.adb
+    if (!this.device) throw new Error('No device yet')
+    return this.device
   }
 
   async stop(): Promise<void> {
     this.screen?.stop()
     this.logcat?.stop()
     await this.play?.stop().catch(() => undefined)
+    if (this.routed) {
+      // Give the phone its own internet back; otherwise it keeps pointing at a closed proxy.
+      const { adb, port } = this.routed
+      this.routed = null
+      await adb.shell('settings put global http_proxy :0').catch(() => undefined)
+      await adb.exec(['reverse', '--remove', `tcp:${port}`]).catch(() => undefined)
+    }
     if (this.emulator) await stopEmulator(this.emulator)
     await this.proxy.stop()
   }

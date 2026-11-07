@@ -3,6 +3,10 @@ import { join } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { toHar } from './har'
 import { Session } from './session'
+import { loadSettings, saveSettings } from './settings'
+import { findSdk } from './sdk'
+import { usbPhones } from './store/usb'
+import type { Settings } from '../shared'
 
 let session: Session | null = null
 let window: BrowserWindow | null = null
@@ -25,6 +29,8 @@ function createWindow(): void {
   else void window.loadFile(join(__dirname, '../renderer/index.html'))
 }
 
+const settingsFile = () => join(app.getPath('userData'), 'settings.json')
+
 function requireSession(): Session {
   if (!session) throw new Error('Session not started')
   return session
@@ -32,7 +38,9 @@ function requireSession(): Session {
 
 ipcMain.handle('session:start', async () => {
   if (session) return
-  session = new Session(join(app.getPath('userData'), 'data'))
+  const settings = loadSettings(settingsFile())
+  if (!settings.phone) return
+  session = new Session(join(app.getPath('userData'), 'data'), settings)
   session.on('progress', (p) => send('progress', p))
   session.on('setup-log', (l) => send('setup-log', l))
   session.on('frame', (png: Buffer) => send('frame', 'capture', new Uint8Array(png)))
@@ -51,6 +59,15 @@ ipcMain.handle('session:start', async () => {
     await failed.stop().catch(() => undefined)
   }
 })
+ipcMain.handle('settings:get', () => loadSettings(settingsFile()))
+// Saving stops the current session; the window then starts a new one with the new choice.
+ipcMain.handle('settings:save', async (_, settings: Settings) => {
+  const previous = session
+  session = null
+  await previous?.stop().catch(() => undefined)
+  return saveSettings(settingsFile(), settings)
+})
+ipcMain.handle('cert:open-settings', () => requireSession().openCertificateSettings())
 ipcMain.handle('exchange:get', (_, id: string) => requireSession().proxy.exchanges.get(id) ?? null)
 ipcMain.handle('capture:clear', () => requireSession().proxy.clear())
 type Device = 'capture' | 'play'
@@ -67,7 +84,11 @@ ipcMain.handle('store:search', (_, q: string) => requireSession().searchStore(q)
 ipcMain.handle('store:install', (_, pkg: string) => requireSession().installFromStore(pkg))
 ipcMain.handle('play:install', (_, link: string) => requireSession().installFromPlay(link))
 ipcMain.handle('play:cancel', () => requireSession().cancelPlay())
-ipcMain.handle('usb:phones', () => requireSession().usbPhones())
+// Also used before any session exists (first-run choice, settings), so it only needs the SDK.
+ipcMain.handle('usb:phones', () => {
+  const sdk = findSdk()
+  return sdk ? usbPhones(sdk.adb) : []
+})
 ipcMain.handle('usb:apps', (_, serial: string) => requireSession().usbApps(serial))
 ipcMain.handle('usb:install', (_, serial: string, pkg: string) => requireSession().installFromUsb(serial, pkg))
 ipcMain.handle('apps:list', () => requireSession().packages())

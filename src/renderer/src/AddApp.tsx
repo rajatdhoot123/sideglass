@@ -1,11 +1,19 @@
 import { useEffect, useState } from 'react'
-import type { StoreApp, UsbPhone } from '../../shared'
+import type { PhoneMode, StoreApp, UsbPhone } from '../../shared'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
 
 type Source = 'store' | 'play' | 'usb' | 'file'
 
 /** Every way to get an app onto the capture phone. */
-export function AddApp({ onClose, onInstalled }: { onClose: () => void; onInstalled: (pkg?: string, open?: boolean) => void }) {
+export function AddApp({
+  mode,
+  onClose,
+  onInstalled,
+}: {
+  mode: PhoneMode
+  onClose: () => void
+  onInstalled: (pkg?: string, open?: boolean) => void
+}) {
   const [source, setSource] = useState<Source>('store')
   const [log, setLog] = useState<string[]>([])
   useEffect(() => window.api.on('store-log', (l) => setLog((prev) => [...prev.slice(-30), l])), [])
@@ -26,11 +34,14 @@ export function AddApp({ onClose, onInstalled }: { onClose: () => void; onInstal
               ['usb', 'From my phone (USB)'],
               ['file', 'APK file'],
             ] as const
-          ).map(([id, label]) => (
-            <button key={id} className={source === id ? 'on' : ''} onClick={() => setSource(id)}>
-              {label}
-            </button>
-          ))}
+          )
+            // On a real phone, the Play Store is right there, and "from my phone" is the same phone.
+            .filter(([id]) => mode === 'virtual' || (id !== 'play' && id !== 'usb'))
+            .map(([id, label]) => (
+              <button key={id} className={source === id ? 'on' : ''} onClick={() => setSource(id)}>
+                {label}
+              </button>
+            ))}
         </nav>
         <div className="modal-body">
           {source === 'store' && <Store note={note} onInstalled={onInstalled} />}
