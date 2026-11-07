@@ -279,13 +279,24 @@ export class Mirror extends EventEmitter {
       logLevel: 'warn',
       scid: new ScrcpyInstanceId(this.scid),
     })
+    if (await this.abandoned(ticket, held)) return
     // screencap fights the encoder for the framebuffer. The last picture stays up until
     // the first video packet. resumeShots() brings screenshots back if the server fails.
     this.frames.stop()
     this.shotsPaused = true
-    const client = await AdbScrcpyClient.start(adb, DefaultServerPath, options)
+    let client: VideoClient
+    try {
+      client = await AdbScrcpyClient.start(adb, DefaultServerPath, options)
+    } catch (error) {
+      this.resumeShots()
+      throw error
+    }
     held.client = client
-    if (await this.abandoned(ticket, held)) return
+    if (await this.abandoned(ticket, held)) {
+      // useFrames() or stop() may have run while the server was starting.
+      this.resumeShots()
+      return
+    }
     this.video = { client, adb }
     this.controller = client.controller
     void this.drain(client, ticket)
