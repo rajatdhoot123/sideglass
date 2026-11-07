@@ -1,0 +1,32 @@
+{
+  "name": "build-with-me",
+  "version": "0.1.0",
+  "description": "See every API call an Android app makes, next to the live phone.",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc -p .",
+    "smoke": "tsx scripts/smoke.mts"
+  },
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.2.1",
+    "electron": "^45.2.3",
+    "electron-vite": "^6.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.6"
+  },
+  "dependencies": {
+    "@peculiar/x509": "^1.14.3",
+    "mockttp": "^4.6.5",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  }
+}
