@@ -1,19 +1,30 @@
 import type { LogLine } from './main/logcat'
 import type { ExchangeSummary, Exchange, TlsFailure } from './main/proxy'
 import type { Progress } from './main/session'
+import type { StoreApp } from './main/store/fdroid'
+import type { UsbPhone } from './main/store/usb'
 
-export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress }
+export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone }
+export type Device = 'capture' | 'play'
 
 /** What the window can ask the main process to do. */
 export interface Api {
   start(): Promise<void>
   getExchange(id: string): Promise<Exchange | null>
   clear(): Promise<void>
-  tap(x: number, y: number): Promise<void>
-  swipe(x1: number, y1: number, x2: number, y2: number, ms: number): Promise<void>
-  key(code: 'BACK' | 'HOME' | 'APP_SWITCH' | 'POWER'): Promise<void>
-  text(value: string): Promise<void>
+  tap(device: Device, x: number, y: number): Promise<void>
+  swipe(device: Device, x1: number, y1: number, x2: number, y2: number, ms: number): Promise<void>
+  key(device: Device, code: 'BACK' | 'HOME' | 'APP_SWITCH' | 'POWER'): Promise<void>
+  text(device: Device, value: string): Promise<void>
   installApk(paths: string[]): Promise<string>
+  featured(): Promise<StoreApp[]>
+  searchStore(query: string): Promise<StoreApp[]>
+  installFromStore(pkg: string): Promise<string>
+  installFromPlay(link: string): Promise<string>
+  cancelPlay(): Promise<void>
+  usbPhones(): Promise<UsbPhone[]>
+  usbApps(serial: string): Promise<string[]>
+  installFromUsb(serial: string, pkg: string): Promise<string>
   pathForFile(file: File): string
   apps(): Promise<string[]>
   launch(pkg: string): Promise<number | null>
@@ -23,7 +34,8 @@ export interface Api {
   on(channel: 'setup-log', cb: (line: string) => void): () => void
   on(channel: 'exchange', cb: (e: ExchangeSummary) => void): () => void
   on(channel: 'tls-failure', cb: (f: TlsFailure) => void): () => void
-  on(channel: 'frame', cb: (png: Uint8Array) => void): () => void
+  on(channel: 'frame', cb: (device: Device, png: Uint8Array) => void): () => void
+  on(channel: 'store-log', cb: (line: string) => void): () => void
   on(channel: 'logcat', cb: (lines: LogLine[]) => void): () => void
 }
 

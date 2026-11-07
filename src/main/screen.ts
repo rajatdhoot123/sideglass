@@ -30,7 +30,8 @@ export class Screen extends EventEmitter {
         const png = await this.adb.execBuffer(['exec-out', 'screencap', '-p'])
         if (png.length > 0) this.emit('frame', png)
       } catch (error) {
-        this.emit('error', error)
+        // A frame can fail while the device reboots or shuts down; report it, never throw.
+        if (this.running) this.emit('frame-error', error)
         await new Promise((r) => setTimeout(r, 1000))
       }
       const wait = Math.max(0, 200 - (Date.now() - started))

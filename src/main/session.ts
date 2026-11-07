@@ -2,7 +2,12 @@ import { EventEmitter } from 'node:events'
 import { generateSPKIFingerprint } from 'mockttp'
 import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
-import { ensureAvd, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
+import { CAPTURE_PHONE, ensureAvd, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
+import { installApks, pullApp } from './store/apk'
+import { FEATURED, installFromFdroid, search as searchFdroid } from './store/fdroid'
+import { packageFromPlayLink, PlayHelper } from './store/play'
+import { usbPhones, userApps } from './store/usb'
+import { Adb } from './adb'
 import { Logcat } from './logcat'
 import { CaptureProxy } from './proxy'
 import { Screen } from './screen'
@@ -59,8 +64,8 @@ export class Session extends EventEmitter {
     this.ca = ca
     const port = await this.step('proxy', 'Starting capture proxy', () => this.proxy.start(ca, 8890))
     this.log(`Proxy listening on 127.0.0.1:${port}`)
-    await this.step('avd', 'Preparing virtual phone', () => ensureAvd(sdk, this.log))
-    const emu = await this.step('boot', 'Booting virtual phone', () => startEmulator(sdk, port, this.log))
+    await this.step('avd', 'Preparing virtual phone', () => ensureAvd(sdk, CAPTURE_PHONE, this.log))
+    const emu = await this.step('boot', 'Booting virtual phone', () => startEmulator(sdk, CAPTURE_PHONE, this.log, port))
     this.emulator = emu
     await this.step('root', 'Getting root on the virtual phone', () => emu.adb.root())
     await this.step('trust', 'Installing certificate as a system CA', async () => {
@@ -86,10 +91,70 @@ export class Session extends EventEmitter {
     this.progress('ready', 'done', 'Ready')
   }
 
-  async installApk(paths: string[]): Promise<string> {
-    const adb = this.requireAdb()
-    const args = paths.length > 1 ? ['install-multiple', '-r', '-g', ...paths] : ['install', '-r', '-g', paths[0]]
-    return adb.exec(args, 300_000)
+  play: PlayHelper | null = null
+  private playCancelled = false
+
+  private get downloads(): string {
+    return join(this.dataDir, 'apks')
+  }
+
+  installApk(paths: string[]): Promise<string> {
+    return installApks(this.requireAdb(), paths)
+  }
+
+  featuredApps() {
+    return FEATURED
+  }
+
+  searchStore(query: string) {
+    return searchFdroid(query)
+  }
+
+  installFromStore(pkg: string): Promise<string> {
+    return installFromFdroid(this.requireAdb(), pkg, join(this.downloads, 'fdroid'), (l) => this.emit('store-log', l))
+  }
+
+  /**
+   * Play Store link: open it on the Play phone, wait for the user to tap Install there,
+   * copy the APK files and install them on the capture phone.
+   */
+  async installFromPlay(link: string): Promise<string> {
+    const pkg = packageFromPlayLink(link)
+    if (!pkg) throw new Error('Paste a Play Store link (…details?id=com.example) or a package name')
+    if (!this.play) {
+      this.play = new PlayHelper(this.sdk!)
+      this.play.on('log', (l) => this.emit('store-log', l))
+      this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
+    }
+    this.playCancelled = false
+    this.emit('store-log', 'Starting the Play Store phone (first time: sign in with your Google account)…')
+    const installed = await this.play.open(pkg)
+    this.emit('store-log', installed ? `${pkg} is already on the Play phone` : `Tap Install on the Play phone for ${pkg}`)
+    const apks = await this.play.waitAndPull(pkg, join(this.downloads, 'play'), undefined, () => this.playCancelled)
+    this.emit('store-log', `Copying ${apks.length} APK file(s) to the capture phone…`)
+    const result = await installApks(this.requireAdb(), apks)
+    this.emit('store-log', `${pkg}: ${result}`)
+    return pkg
+  }
+
+  cancelPlay(): void {
+    this.playCancelled = true
+  }
+
+  usbPhones() {
+    return usbPhones(this.sdk!.adb)
+  }
+
+  usbApps(serial: string) {
+    return userApps(new Adb(this.sdk!.adb, serial))
+  }
+
+  async installFromUsb(serial: string, pkg: string): Promise<string> {
+    this.emit('store-log', `Copying ${pkg} from ${serial}…`)
+    const apks = await pullApp(new Adb(this.sdk!.adb, serial), pkg, join(this.downloads, 'usb'))
+    const result = await installApks(this.requireAdb(), apks)
+    this.emit('store-log', `${pkg}: ${result}`)
+    return result
   }
 
   async packages(): Promise<string[]> {
@@ -125,6 +190,7 @@ export class Session extends EventEmitter {
   async stop(): Promise<void> {
     this.screen?.stop()
     this.logcat?.stop()
+    await this.play?.stop().catch(() => undefined)
     if (this.emulator) await stopEmulator(this.emulator)
     await this.proxy.stop()
   }

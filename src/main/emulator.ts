@@ -8,33 +8,50 @@ import type { Sdk } from './sdk'
 
 const run = promisify(execFile)
 
-export const AVD_NAME = 'sideglass_api35'
 export const API_LEVEL = 35
-/** Google APIs images are userdebug builds: adb root works. Google Play images cannot be rooted. */
 export const IMAGE_ABI = arch() === 'arm64' ? 'arm64-v8a' : 'x86_64'
-export const IMAGE = `system-images;android-${API_LEVEL};google_apis;${IMAGE_ABI}`
 
 export type Log = (line: string) => void
+
+/** One virtual phone Sideglass manages. */
+export interface PhoneSpec {
+  avd: string
+  /** google_apis (rootable) or google_apis_playstore (has Play, cannot be rooted). */
+  tag: 'google_apis' | 'google_apis_playstore'
+  port: number
+}
+
+/** The phone apps run on, with all traffic through the proxy. Google APIs images allow adb root. */
+export const CAPTURE_PHONE: PhoneSpec = { avd: 'sideglass_api35', tag: 'google_apis', port: 5590 }
+/** A normal phone with the Play Store, used only to download apps with the user's own account. */
+export const PLAY_PHONE: PhoneSpec = { avd: 'sideglass_play_api35', tag: 'google_apis_playstore', port: 5592 }
+
+export const imageOf = (spec: PhoneSpec) => `system-images;android-${API_LEVEL};${spec.tag};${IMAGE_ABI}`
 
 function avdHome(): string {
   return process.env.ANDROID_AVD_HOME ?? join(homedir(), '.android', 'avd')
 }
 
-export function avdExists(name = AVD_NAME): boolean {
+export function avdExists(name: string): boolean {
   return existsSync(join(avdHome(), `${name}.ini`))
 }
 
-export function imageInstalled(sdk: Sdk): boolean {
-  return existsSync(join(sdk.root, 'system-images', `android-${API_LEVEL}`, 'google_apis', IMAGE_ABI))
+export function imageInstalled(sdk: Sdk, spec: PhoneSpec): boolean {
+  return existsSync(join(sdk.root, 'system-images', `android-${API_LEVEL}`, spec.tag, IMAGE_ABI))
 }
 
-/** Download the system image if needed (accepting Google's SDK licenses) and create our AVD. */
-export async function ensureAvd(sdk: Sdk, log: Log): Promise<void> {
-  if (!imageInstalled(sdk)) {
+function sdkEnv(sdk: Sdk): NodeJS.ProcessEnv {
+  return { ...process.env, ANDROID_HOME: sdk.root, ANDROID_SDK_ROOT: sdk.root }
+}
+
+/** Download the system image if needed (accepting Google's SDK licenses) and create the AVD. */
+export async function ensureAvd(sdk: Sdk, spec: PhoneSpec, log: Log): Promise<void> {
+  const image = imageOf(spec)
+  if (!imageInstalled(sdk, spec)) {
     if (!sdk.sdkmanager) throw new Error('Android cmdline-tools (sdkmanager) not found')
-    log(`Downloading ${IMAGE} (about 1.5 GB, first run only)...`)
+    log(`Downloading ${image} (about 1.5 GB, first time only)...`)
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(sdk.sdkmanager, ['--install', IMAGE, 'platform-tools', 'emulator'], { env: sdkEnv(sdk) })
+      const child = spawn(sdk.sdkmanager, ['--install', image, 'platform-tools', 'emulator'], { env: sdkEnv(sdk) })
       child.stdin.write('y\n'.repeat(20))
       child.stdin.end()
       child.stdout.on('data', (d: Buffer) => log(d.toString().trim()))
@@ -42,13 +59,13 @@ export async function ensureAvd(sdk: Sdk, log: Log): Promise<void> {
       child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`sdkmanager exited ${code}`))))
     })
   }
-  if (avdExists()) return
+  if (avdExists(spec.avd)) return
   if (!sdk.avdmanager) throw new Error('Android cmdline-tools (avdmanager) not found')
-  log(`Creating virtual phone ${AVD_NAME}...`)
+  log(`Creating virtual phone ${spec.avd}...`)
   await new Promise<void>((resolve, reject) => {
     const child = spawn(
       sdk.avdmanager,
-      ['create', 'avd', '--name', AVD_NAME, '--package', IMAGE, '--device', 'pixel_7', '--force'],
+      ['create', 'avd', '--name', spec.avd, '--package', image, '--device', 'pixel_7', '--force'],
       { env: sdkEnv(sdk) },
     )
     child.stdin.write('no\n')
@@ -60,10 +77,6 @@ export async function ensureAvd(sdk: Sdk, log: Log): Promise<void> {
   })
 }
 
-function sdkEnv(sdk: Sdk): NodeJS.ProcessEnv {
-  return { ...process.env, ANDROID_HOME: sdk.root, ANDROID_SDK_ROOT: sdk.root }
-}
-
 export interface RunningEmulator {
   serial: string
   process: ChildProcess | null
@@ -71,11 +84,11 @@ export interface RunningEmulator {
 }
 
 /**
- * Start our AVD with no window (the app draws the screen itself) and all of its TCP
- * traffic sent through our proxy. Reuses it if already running on [port].
+ * Start a phone with no window (Sideglass draws the screen itself). With [proxyPort], all of
+ * its TCP traffic goes through the capture proxy. Reuses it if already running.
  */
-export async function startEmulator(sdk: Sdk, proxyPort: number, log: Log, port = 5590): Promise<RunningEmulator> {
-  const serial = `emulator-${port}`
+export async function startEmulator(sdk: Sdk, spec: PhoneSpec, log: Log, proxyPort?: number): Promise<RunningEmulator> {
+  const serial = `emulator-${spec.port}`
   const running = await Adb.devices(sdk.adb)
   if (running.some((d) => d.serial === serial)) {
     log(`Using running emulator ${serial}`)
@@ -83,21 +96,11 @@ export async function startEmulator(sdk: Sdk, proxyPort: number, log: Log, port 
     await adb.waitForBoot()
     return { serial, process: null, adb }
   }
-  log(`Starting ${AVD_NAME} on ${serial}...`)
-  const child = spawn(
-    sdk.emulator,
-    [
-      '-avd', AVD_NAME,
-      '-port', String(port),
-      '-no-window',
-      '-no-boot-anim',
-      '-no-snapshot-save',
-      '-no-audio',
-      '-gpu', 'auto',
-      '-http-proxy', `http://127.0.0.1:${proxyPort}`,
-    ],
-    { env: sdkEnv(sdk), detached: false },
-  )
+  log(`Starting ${spec.avd} on ${serial}...`)
+  const args = ['-avd', spec.avd, '-port', String(spec.port), '-no-window', '-no-boot-anim', '-no-audio', '-gpu', 'auto']
+  // The capture phone always cold-boots into a clean state; the Play phone keeps its sign-in.
+  if (proxyPort) args.push('-no-snapshot-save', '-http-proxy', `http://127.0.0.1:${proxyPort}`)
+  const child = spawn(sdk.emulator, args, { env: sdkEnv(sdk), detached: false })
   child.stdout?.on('data', (d: Buffer) => {
     const line = d.toString().trim()
     if (/ERROR|FATAL|boot completed/i.test(line)) log(line)

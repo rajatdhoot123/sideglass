@@ -19,7 +19,15 @@ left; the phone is on the right, and you click and drag on it to use it.
 - **Refused TLS:** hosts that rejected our certificate, which usually means certificate
   pinning.
 - **Phone:** live screen; click = tap, drag = swipe; back/home/recents; type text.
-- **Apps:** drop APKs (split APKs together) to install; launch an app from the list.
+- **Add apps** (the **+ Add app** button):
+  - **App store:** search and install free apps from F-Droid, with a featured shelf.
+  - **Play Store link:** paste a link; Sideglass opens it on a second virtual phone that has
+    the Play Store. Sign in there once with your own Google account and tap Install. The
+    app's APK files (base and splits) are copied to the capture phone. Nothing comes from
+    third-party APK sites.
+  - **From my phone:** pick an app on a USB-connected phone (USB debugging on) to copy it over.
+  - **APK file:** drop APKs on the phone (split APKs together).
+- **Launch** an installed app from the list.
 - **Logs:** logcat, filtered to the launched app.
 - **Test SMS:** send an SMS from any sender to the phone.
 - **Export HAR** for Chrome DevTools, Charles, Insomnia and the like.
@@ -51,8 +59,9 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 
 ## Limits
 
-- Google Play system images cannot be rooted, so the virtual phone has no Play Store.
-  Install apps by dropping their APKs.
+- Google Play system images cannot be rooted, so the capture phone has no Play Store; the
+  separate Play phone downloads apps for it. Paid apps and apps Google does not offer on that
+  phone cannot be fetched.
 - Apps that pin certificates refuse the proxy (listed under Refused TLS). Bypassing that
   with Frida is planned.
 - Apps that detect root or emulators may refuse to run.
@@ -65,8 +74,7 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 2. Frida: certificate unpinning for chosen apps
 3. Per-app request attribution
 4. Timeline linking taps to the requests that follow
-5. Copy an installed app from a USB phone into the virtual phone
-6. gRPC and protobuf decoding
+5. gRPC and protobuf decoding
 
 ## License
 
