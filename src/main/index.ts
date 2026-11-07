@@ -1,6 +1,7 @@
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import type { KeyEvent } from '../shared'
 import { toHar } from './har'
 import { Session } from './session'
 
@@ -37,6 +38,10 @@ ipcMain.handle('session:start', async () => {
   session.on('setup-log', (l) => send('setup-log', l))
   session.on('frame', (png: Buffer) => send('frame', 'capture', new Uint8Array(png)))
   session.on('play-frame', (png: Buffer) => send('frame', 'play', new Uint8Array(png)))
+  session.on('video', (packet) => send('video', 'capture', packet))
+  session.on('play-video', (packet) => send('video', 'play', packet))
+  session.on('screen-mode', (mode) => send('screen-mode', 'capture', mode))
+  session.on('play-screen-mode', (mode) => send('screen-mode', 'play', mode))
   session.on('store-log', (l) => send('store-log', l))
   session.on('play-stage', (st) => send('play-stage', st))
   session.on('logcat', (lines) => send('logcat', lines))
@@ -61,6 +66,19 @@ ipcMain.handle('screen:swipe', (_, device: Device, x1: number, y1: number, x2: n
 )
 ipcMain.handle('screen:key', (_, device: Device, code: 'BACK' | 'HOME' | 'APP_SWITCH' | 'POWER') => screenOf(device)?.key(code))
 ipcMain.handle('screen:text', (_, device: Device, value: string) => screenOf(device)?.text(value))
+ipcMain.handle('screen:touch', (_, device: Device, action: 'down' | 'move' | 'up' | 'cancel', pointerId: number, x: number, y: number) =>
+  screenOf(device)?.touch(action, pointerId, x, y),
+)
+ipcMain.handle('screen:scroll', (_, device: Device, x: number, y: number, dx: number, dy: number) =>
+  screenOf(device)?.scroll(x, y, dx, dy),
+)
+ipcMain.handle('screen:keyevent', (_, device: Device, event: KeyEvent) => screenOf(device)?.keyEvent(event))
+ipcMain.handle('screen:refresh', (_, device: Device) => screenOf(device)?.refresh())
+ipcMain.handle('screen:frames', (_, device: Device) => screenOf(device)?.useFrames())
+ipcMain.handle('screen:state', () => ({
+  capture: requireSession().screen?.mode ?? 'frames',
+  play: requireSession().play?.screen?.mode ?? 'frames',
+}))
 ipcMain.handle('apk:install', (_, paths: string[]) => requireSession().installApk(paths))
 ipcMain.handle('store:featured', () => requireSession().featuredApps())
 ipcMain.handle('store:search', (_, q: string) => requireSession().searchStore(q))
@@ -72,7 +90,7 @@ ipcMain.handle('usb:apps', (_, serial: string) => requireSession().usbApps(seria
 ipcMain.handle('usb:install', (_, serial: string, pkg: string) => requireSession().installFromUsb(serial, pkg))
 ipcMain.handle('apps:list', () => requireSession().packages())
 ipcMain.handle('app:launch', (_, pkg: string) => requireSession().launch(pkg))
-ipcMain.handle('sms:send', (_, from: string, text: string) => requireSession().sendSms(from, text))
+ipcMain.handle('sms:send', (_, device: Device, from: string, text: string) => requireSession().sendSms(device, from, text))
 ipcMain.handle('har:export', async () => {
   const s = requireSession()
   const target = await dialog.showSaveDialog({ defaultPath: `capture-${Date.now()}.har` })

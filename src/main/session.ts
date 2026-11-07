@@ -11,9 +11,9 @@ import { usbPhones, userApps } from './store/usb'
 import { Adb } from './adb'
 import { Logcat } from './logcat'
 import { CaptureProxy } from './proxy'
-import { Screen } from './screen'
+import { Mirror } from './mirror'
 import { findSdk, type Sdk } from './sdk'
-import type { LaunchResult } from '../shared'
+import type { Device, LaunchResult } from '../shared'
 
 export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'root' | 'trust' | 'ready'
 export interface Progress {
@@ -28,7 +28,7 @@ export class Session extends EventEmitter {
   sdk: Sdk | null = null
   ca: CaFiles | null = null
   emulator: RunningEmulator | null = null
-  screen: Screen | null = null
+  screen: Mirror | null = null
   logcat: Logcat | null = null
 
   constructor(private readonly dataDir: string) {
@@ -74,9 +74,7 @@ export class Session extends EventEmitter {
       await this.trust(emu.adb, ca)
       this.log(`Android API ${await sdkVersion(emu.adb)}: CA ${ca.androidName} trusted`)
     })
-    this.screen = new Screen(emu.adb)
-    this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
-    await this.screen.start()
+    await this.attachScreen(emu.adb)
     this.logcat = new Logcat(emu.adb)
     this.logcat.on('lines', (lines) => this.emit('logcat', lines))
     this.logcat.start()
@@ -118,23 +116,42 @@ export class Session extends EventEmitter {
     say('This app checks its Google Play licence. Copying Google Play from the Play phone (first time only)…')
     const files = await pullPlayStore(await this.playHelper().start(), join(this.dataDir, 'playstore'))
     this.logcat?.stop()
-    await installPlayStore(adb, files, say)
-    await adb.root()
-    await this.trust(adb, this.ca!)
-    this.logcat = new Logcat(adb)
-    this.logcat.on('lines', (lines) => this.emit('logcat', lines))
-    this.logcat.start()
+    this.screen?.stop()
+    try {
+      await installPlayStore(adb, files, say)
+      await adb.root()
+      await this.trust(adb, this.ca!)
+    } finally {
+      this.logcat = new Logcat(adb)
+      this.logcat.on('lines', (lines) => this.emit('logcat', lines))
+      this.logcat.start()
+      await this.attachScreen(adb)
+    }
     say('Google Play is on the capture phone.')
   }
 
   private playHelper(): PlayHelper {
     if (!this.play) {
-      this.play = new PlayHelper(this.sdk!)
+      this.play = new PlayHelper(this.sdk!, join(this.dataDir, 'scrcpy'))
       this.play.on('log', (l) => this.emit('store-log', l))
       this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
+      this.play.on('video', (packet) => this.emit('play-video', packet))
+      this.play.on('screen-mode', (mode) => this.emit('play-screen-mode', mode))
       this.play.on('stage', (st) => this.emit('play-stage', st))
     }
     return this.play
+  }
+
+  /** The scrcpy server dies across a reboot, so the picture has to be opened again. */
+  private async attachScreen(adb: Adb): Promise<void> {
+    this.screen?.stop()
+    const screen = new Mirror(adb, join(this.dataDir, 'scrcpy'), 1)
+    screen.on('frame', (png: Buffer) => this.emit('frame', png))
+    screen.on('video', (packet) => this.emit('video', packet))
+    screen.on('mode', (mode) => this.emit('screen-mode', mode))
+    screen.on('log', (line: string) => this.log(line))
+    this.screen = screen
+    await screen.start()
   }
 
   play: PlayHelper | null = null
@@ -233,14 +250,16 @@ export class Session extends EventEmitter {
         message = `${pkg} checks its Google Play licence: sign in to Google Play on this phone with the account that has the app.`
       }
     }
-    // Start the launcher activity directly: `monkey` aborts if any other process crashes meanwhile.
-    const resolved = await adb.shell(`cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER ${pkg}`)
+    // `monkey` aborts when any other process crashes, which the emulator's Bluetooth stack does after a reboot.
+    const resolved = await adb.shell(
+      `cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER ${pkg}`,
+    )
     const component = resolved.trim().split('\n').pop()?.trim() ?? ''
     if (!component.startsWith(`${pkg}/`)) throw new Error(`${pkg} has no launcher activity`)
     await adb.shell(`am force-stop ${pkg}`)
     await adb.shell(`am start -n '${component}'`)
     await new Promise((r) => setTimeout(r, 1500))
-    return { pid: await this.pidOf(pkg), message }
+    return { device: 'capture', pid: await this.pidOf(pkg), message }
   }
 
   async pidOf(pkg: string): Promise<number | null> {
@@ -248,8 +267,10 @@ export class Session extends EventEmitter {
     return out ? Number(out.split(/\s+/)[0]) : null
   }
 
-  async sendSms(from: string, text: string): Promise<void> {
-    await this.requireAdb().exec(['emu', 'sms', 'send', from, text])
+  async sendSms(device: Device, from: string, text: string): Promise<void> {
+    const adb = device === 'play' ? this.play?.emulator?.adb : this.requireAdb()
+    if (!adb) throw new Error(device === 'play' ? 'The Play phone is not running' : 'No device yet')
+    await adb.exec(['emu', 'sms', 'send', from, text])
   }
 
   private requireAdb() {

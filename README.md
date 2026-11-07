@@ -18,7 +18,8 @@ left; the phone is on the right, and you click and drag on it to use it.
   pretty-printed) and headers. A filter and a "hide Google system traffic" switch.
 - **Refused TLS:** hosts that rejected our certificate, which usually means certificate
   pinning.
-- **Phone:** live screen; click = tap, drag = swipe; back/home/recents; type text.
+- **Phone:** live H.264 video; press, drag, long-press, scroll, and type with the keyboard.
+  If the video stream cannot start, it falls back to screenshots (click = tap, drag = swipe).
 - **Add apps** (the **+ Add app** button):
   - **App store:** search and install free apps from F-Droid, with a featured shelf.
   - **Play Store link:** paste a link; Sideglass opens it on a second virtual phone that has
@@ -59,13 +60,15 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 | Capture proxy | [mockttp](https://github.com/httptoolkit/mockttp) (Apache-2.0): HTTPS interception, HTTP/2, WebSockets; unknown protocols passed through |
 | Routing | The emulator's `-http-proxy`, so every app's TCP goes through the proxy, including apps that ignore the system proxy setting |
 | Trust | A generated CA, mounted over `/system/etc/security/cacerts` and `/apex/com.android.conscrypt/cacerts` on a tmpfs; nothing on the system image changes |
-| Screen | `screencap` frames and `input` events (v0.1); a scrcpy video stream is planned |
+| Screen | [scrcpy](https://github.com/Genymobile/scrcpy) server (Apache-2.0, downloaded on first use) via [Tango](https://tangoadb.dev/scrcpy/) (MIT): H.264, decoded with WebCodecs. Screenshots if the stream cannot start |
 
 ## Limits
 
-- Google Play system images cannot be rooted, so the capture phone has no Play Store; the
-  separate Play phone downloads apps for it. Paid apps and apps Google does not offer on that
-  phone cannot be fetched.
+- Google Play system images cannot be rooted, so apps are downloaded on a separate Play phone.
+  The first launch of an app that checks a Play licence copies that Play Store onto the capture
+  phone. Paid apps and apps Google does not offer on the Play phone cannot be fetched.
+- Signing in to Google Play on the capture phone goes through the capture proxy. A host that
+  refuses the proxy shows under Refused TLS and the sign-in cannot finish until that is bypassed.
 - Apps that pin certificates refuse the proxy (listed under Refused TLS). Bypassing that
   with Frida is planned.
 - Apps that detect root or emulators may refuse to run.
@@ -74,11 +77,10 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 
 ## Roadmap
 
-1. scrcpy video stream and keyboard input
-2. Frida: certificate unpinning for chosen apps
-3. Per-app request attribution
-4. Timeline linking taps to the requests that follow
-5. gRPC and protobuf decoding
+1. Frida: certificate unpinning for chosen apps
+2. Per-app request attribution
+3. Timeline linking taps to the requests that follow
+4. gRPC and protobuf decoding
 
 ## License
 
