@@ -39,6 +39,12 @@ export class PlayHelper extends EventEmitter {
     if (this.emulator) return this.emulator.adb
     await ensureAvd(this.sdk, PLAY_PHONE, this.log)
     this.emulator = await startEmulator(this.sdk, PLAY_PHONE, this.log)
+    const storeApk = await this.emulator.adb.shell('pm path com.android.vending').catch(() => '')
+    if (!storeApk.trim() || /LicenseChecker/i.test(storeApk)) {
+      await stopEmulator(this.emulator).catch(() => undefined)
+      this.emulator = null
+      throw new Error('The Play phone image does not contain the full Google Play Store (only the Android license checker was found).')
+    }
     this.screen = new Screen(this.emulator.adb)
     this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
     await this.screen.start()

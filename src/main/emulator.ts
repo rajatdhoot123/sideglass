@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, arch } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -36,6 +36,24 @@ export function avdExists(name: string): boolean {
   return existsSync(join(avdHome(), `${name}.ini`))
 }
 
+/** AVD Manager can create a Google Play image with Play Store disabled in its device config. */
+function enablePlayStore(spec: PhoneSpec): void {
+  if (spec.tag !== 'google_apis_playstore') return
+  const config = join(avdHome(), `${spec.avd}.avd`, 'config.ini')
+  if (!existsSync(config)) return
+  const contents = readFileSync(config, 'utf8')
+  const updated = /^PlayStore\.enabled=.*$/m.test(contents)
+    ? contents.replace(/^PlayStore\.enabled=.*$/m, 'PlayStore.enabled=yes')
+    : `${contents.trimEnd()}\nPlayStore.enabled=yes\n`
+  if (updated !== contents) writeFileSync(config, updated)
+}
+
+function playStoreRuntimeEnabled(spec: PhoneSpec): boolean {
+  const hardware = join(avdHome(), `${spec.avd}.avd`, 'hardware-qemu.ini')
+  if (!existsSync(hardware)) return false
+  return /^PlayStore\.enabled\s*=\s*(?:yes|true)\s*$/mi.test(readFileSync(hardware, 'utf8'))
+}
+
 export function imageInstalled(sdk: Sdk, spec: PhoneSpec): boolean {
   return existsSync(join(sdk.root, 'system-images', `android-${API_LEVEL}`, spec.tag, IMAGE_ABI))
 }
@@ -59,7 +77,10 @@ export async function ensureAvd(sdk: Sdk, spec: PhoneSpec, log: Log): Promise<vo
       child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`sdkmanager exited ${code}`))))
     })
   }
-  if (avdExists(spec.avd)) return
+  if (avdExists(spec.avd)) {
+    enablePlayStore(spec)
+    return
+  }
   if (!sdk.avdmanager) throw new Error('Android cmdline-tools (avdmanager) not found')
   log(`Creating virtual phone ${spec.avd}...`)
   await new Promise<void>((resolve, reject) => {
@@ -75,6 +96,7 @@ export async function ensureAvd(sdk: Sdk, spec: PhoneSpec, log: Log): Promise<vo
     child.on('error', reject)
     child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`avdmanager exited ${code}: ${err}`))))
   })
+  enablePlayStore(spec)
 }
 
 export interface RunningEmulator {
@@ -90,14 +112,37 @@ export interface RunningEmulator {
 export async function startEmulator(sdk: Sdk, spec: PhoneSpec, log: Log, proxyPort?: number): Promise<RunningEmulator> {
   const serial = `emulator-${spec.port}`
   const running = await Adb.devices(sdk.adb)
-  if (running.some((d) => d.serial === serial)) {
+  const existing = running.find((d) => d.serial === serial)
+  const alreadyRunning = existing?.state === 'device'
+  if (existing && !alreadyRunning) {
+    log(`Waiting for ${serial} to finish booting…`)
+    await new Adb(sdk.adb, serial).waitForBoot()
+  }
+  if (existing && (spec.tag !== 'google_apis_playstore' || playStoreRuntimeEnabled(spec))) {
     log(`Using running emulator ${serial}`)
     const adb = new Adb(sdk.adb, serial)
     await adb.waitForBoot()
     return { serial, process: null, adb }
   }
+  if (existing) {
+    // A running helper can retain a snapshot created while Play Store was disabled. Restart it
+    // after fixing config.ini; otherwise the old broken runtime would be silently reused.
+    log(`Restarting ${serial} to apply the Play Store configuration…`)
+    const adb = new Adb(sdk.adb, serial)
+    await adb.exec(['emu', 'kill'])
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline && (await Adb.devices(sdk.adb)).some((d) => d.serial === serial)) {
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+    if ((await Adb.devices(sdk.adb)).some((d) => d.serial === serial)) {
+      throw new Error(`Could not restart ${serial} to enable Google Play`)
+    }
+  }
   log(`Starting ${spec.avd} on ${serial}...`)
   const args = ['-avd', spec.avd, '-port', String(spec.port), '-no-window', '-no-boot-anim', '-no-audio', '-gpu', 'auto']
+  // Force a cold boot so emulator-generated hardware settings reflect the enabled Play Store
+  // config. This preserves userdata and the user's Google sign-in.
+  if (spec.tag === 'google_apis_playstore') args.push('-no-snapshot-load')
   // The capture phone always cold-boots into a clean state; the Play phone keeps its sign-in.
   if (proxyPort) args.push('-no-snapshot-save', '-http-proxy', `http://127.0.0.1:${proxyPort}`)
   const child = spawn(sdk.emulator, args, { env: sdkEnv(sdk), detached: false })
