@@ -35,7 +35,9 @@ ipcMain.handle('session:start', async () => {
   session = new Session(join(app.getPath('userData'), 'data'))
   session.on('progress', (p) => send('progress', p))
   session.on('setup-log', (l) => send('setup-log', l))
-  session.on('frame', (png: Buffer) => send('frame', new Uint8Array(png)))
+  session.on('frame', (png: Buffer) => send('frame', 'capture', new Uint8Array(png)))
+  session.on('play-frame', (png: Buffer) => send('frame', 'play', new Uint8Array(png)))
+  session.on('store-log', (l) => send('store-log', l))
   session.on('logcat', (lines) => send('logcat', lines))
   session.proxy.on('exchange', (e) => send('exchange', e))
   session.proxy.on('tls-failure', (f) => send('tls-failure', f))
@@ -50,13 +52,23 @@ ipcMain.handle('session:start', async () => {
 })
 ipcMain.handle('exchange:get', (_, id: string) => requireSession().proxy.exchanges.get(id) ?? null)
 ipcMain.handle('capture:clear', () => requireSession().proxy.clear())
-ipcMain.handle('screen:tap', (_, x: number, y: number) => requireSession().screen?.tap(x, y))
-ipcMain.handle('screen:swipe', (_, x1: number, y1: number, x2: number, y2: number, ms: number) =>
-  requireSession().screen?.swipe(x1, y1, x2, y2, ms),
+type Device = 'capture' | 'play'
+const screenOf = (device: Device) => (device === 'play' ? requireSession().play?.screen : requireSession().screen)
+ipcMain.handle('screen:tap', (_, device: Device, x: number, y: number) => screenOf(device)?.tap(x, y))
+ipcMain.handle('screen:swipe', (_, device: Device, x1: number, y1: number, x2: number, y2: number, ms: number) =>
+  screenOf(device)?.swipe(x1, y1, x2, y2, ms),
 )
-ipcMain.handle('screen:key', (_, code: 'BACK' | 'HOME' | 'APP_SWITCH' | 'POWER') => requireSession().screen?.key(code))
-ipcMain.handle('screen:text', (_, value: string) => requireSession().screen?.text(value))
+ipcMain.handle('screen:key', (_, device: Device, code: 'BACK' | 'HOME' | 'APP_SWITCH' | 'POWER') => screenOf(device)?.key(code))
+ipcMain.handle('screen:text', (_, device: Device, value: string) => screenOf(device)?.text(value))
 ipcMain.handle('apk:install', (_, paths: string[]) => requireSession().installApk(paths))
+ipcMain.handle('store:featured', () => requireSession().featuredApps())
+ipcMain.handle('store:search', (_, q: string) => requireSession().searchStore(q))
+ipcMain.handle('store:install', (_, pkg: string) => requireSession().installFromStore(pkg))
+ipcMain.handle('play:install', (_, link: string) => requireSession().installFromPlay(link))
+ipcMain.handle('play:cancel', () => requireSession().cancelPlay())
+ipcMain.handle('usb:phones', () => requireSession().usbPhones())
+ipcMain.handle('usb:apps', (_, serial: string) => requireSession().usbApps(serial))
+ipcMain.handle('usb:install', (_, serial: string, pkg: string) => requireSession().installFromUsb(serial, pkg))
 ipcMain.handle('apps:list', () => requireSession().packages())
 ipcMain.handle('app:launch', async (_, pkg: string) => {
   const s = requireSession()
