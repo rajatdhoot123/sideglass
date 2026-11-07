@@ -20,6 +20,8 @@ export function Phone({
   const [smsText, setSmsText] = useState('Rs.500.00 debited from A/c XX1234 on 07-11-26 to ZOMATO. UPI Ref 512345678901')
   const [dragging, setDragging] = useState(false)
   useEffect(() => void window.api.apps().then(setApps), [])
+  // Long steps (such as putting Google Play on the phone for a licensed app) report progress here.
+  useEffect(() => window.api.on('store-log', (line) => setStatus(line)), [])
 
   const showLaunch = (pkg: string, result: LaunchResult, idle: string) => {
     onActiveDevice(result.device)

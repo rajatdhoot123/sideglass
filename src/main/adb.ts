@@ -67,6 +67,27 @@ export class Adb {
     if (id !== '0') throw new Error(`adb root did not take effect (uid ${id})`)
   }
 
+  /** `adb remount`; returns stdout and stderr together, since adb splits its messages across both. */
+  async remount(): Promise<string> {
+    const result = await run(this.adbPath, ['-s', this.serial, 'remount'], { timeout: 120_000 }).catch(
+      (e: { stdout?: string; stderr?: string; message: string }) => ({ stdout: e.stdout ?? '', stderr: e.stderr || e.message }),
+    )
+    return `${result.stdout}\n${result.stderr}`
+  }
+
+  /** Reboot and wait until the phone has finished booting again. */
+  async reboot(timeoutMs = 240_000): Promise<void> {
+    await this.exec(['reboot']).catch(() => undefined)
+    // `wait-for-device` can return before the phone goes down; wait for it to leave first.
+    const down = Date.now() + 60_000
+    while (Date.now() < down) {
+      const booted = await this.shell('getprop sys.boot_completed', 5_000).catch(() => '')
+      if (booted.trim() !== '1') break
+      await new Promise((r) => setTimeout(r, 1000))
+    }
+    await this.waitForBoot(timeoutMs)
+  }
+
   async screenSize(): Promise<{ width: number; height: number }> {
     const out = await this.shell('wm size')
     const match = /Override size: (\d+)x(\d+)/.exec(out) ?? /Physical size: (\d+)x(\d+)/.exec(out)

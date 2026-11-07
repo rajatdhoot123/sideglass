@@ -23,8 +23,9 @@ Use it on apps you build or are allowed to test. Keep it local only, with no clo
 | #3 | Play hand-over: Sideglass taps Install and stops only when the user must act. |
 | #4 | Roadmap 4.1. H.264 scrcpy stream, real touch, scroll and keyboard, screenshot fallback, on both phones. |
 | #5 | The Play helper AVD gets `PlayStore.enabled=yes`. A running helper that still has Play off is restarted after its AVD lock is released. Cold boot only when that flag was off. |
-| #6 | Apps that declare Play licensing, including PairIP, launch on the Play phone. The view can switch back to the capture phone. Capture logcat is not filtered with a Play-phone pid. |
-| #8 | Test SMS goes to the phone on screen. A licensed launch waits while a Play install is in progress. One shared Play-phone startup. |
+| #6 | First approach for licensed apps: run them on the Play phone, outside the proxy. Replaced by #7. |
+| #7 | The real Play Store is copied onto the capture phone, so a licensed app stays there and its traffic is captured. The capture phone starts with `-writable-system`. |
+| #8 | Test SMS goes to the phone on screen. One shared Play-phone startup. |
 
 Next roadmap item is **4.2 Frida certificate unpinning**. 4.3–4.6 are not started.
 
@@ -34,16 +35,18 @@ Next roadmap item is **4.2 Frida certificate unpinning**. 4.3–4.6 are not star
 src/main/            Electron main process (Node)
   index.ts           window + IPC handlers; SIDEGLASS_SNAPSHOT=/x.png saves window screenshots every 3s
   session.ts         setup steps in order (sdk → ca → proxy → avd → boot → root → trust → ready),
-                     app install/launch, Play/USB/F-Droid entry points. Licensed and PairIP
-                     apps launch on the Play phone instead of the capture phone
+                     app install/launch, Play/USB/F-Droid entry points. The first licensed
+                     launch copies the real Play Store onto the capture phone
   sdk.ts             finds the Android SDK (ANDROID_HOME, Android Studio, Homebrew, ~/.sideglass/android-sdk)
-  adb.ts             adb CLI wrapper (exec, shell, root, waitForBoot, screenSize)
+  adb.ts             adb CLI wrapper (exec, shell, root, remount, reboot, waitForBoot, screenSize)
   emulator.ts        PhoneSpec: CAPTURE_PHONE (google_apis, port 5590, rooted, -http-proxy)
                      and PLAY_PHONE (google_apis_playstore, port 5592, not rooted); ensureAvd, start, stop.
                      Repairs `PlayStore.enabled` in the Play AVD config before boot
   certificate.ts     CA create/load; installSystemCa: tmpfs over /system/etc/security/cacerts and
                      bind mount over /apex/com.android.conscrypt/cacerts in EVERY mount namespace
   proxy.ts           mockttp proxy: Exchange records, bodies (2 MB cap), TLS refusals, 5000-row cap
+  playstore.ts       copies Phonesky and its privileged-permission allowlist from the Play phone
+                     and replaces the capture phone's LicenseChecker stub
   screen.ts          screenshot fallback: `screencap -p` loop + `input tap/swipe/keyevent/text`
   mirror.ts          scrcpy H.264 stream (Tango) with touch, scroll, and keyboard; falls back to screen.ts
   keys.ts            DOM key codes to Android key codes
@@ -52,7 +55,7 @@ src/main/            Electron main process (Node)
   store/apk.ts       pm path / pull / install(-multiple); replaces differently signed user copies
   store/fdroid.ts    F-Droid search API + featured list + install (retries other ABI builds)
   store/play.ts      PlayHelper: second phone, open market:// link, wait for install, pull splits.
-                     Also checks the Play installer and launches that copy for licensed apps
+                     Copies onto the capture phone are installed as coming from Google Play
   store/usb.ts       list USB phones and their user apps
 src/preload/index.ts contextBridge `window.api`
 src/shared.ts        Api type shared by preload and renderer
@@ -107,16 +110,17 @@ run downloads `system-images;android-35;google_apis;<abi>`; the Play flow also d
 - Requests are not tagged with the app that made them, so the list mixes all apps.
 - The Store tab of Add app was clicked through. The Play, USB and APK-file tabs were not.
 - Not tested: a real Google sign-in and Install on the Play phone; a real USB phone.
-- Licensed apps run on the Play phone, so their requests never reach the capture proxy.
-  4.2 and 4.3 do not cover that phone until those designs say so.
+- The first licensed launch reboots the capture phone while Google Play is installed.
+  Signing in there goes through the capture proxy and can show up under Refused TLS.
+  A real Google account sign-in has not been completed.
 
 ## 3. Add apps: checks still open after merge
 
 - [x] UI pass of the Store tab over CDP: featured list renders, Install (Tasks, AntennaPod) → Success.
 - [ ] UI pass of the Play, USB and APK-file tabs by hand.
 - [ ] Real Play test: sign in on the Play phone, install a free app (e.g. Wikipedia), and confirm
-      base + splits are copied to the capture phone. Launch stays on the capture phone unless
-      the app declares a Play license, in which case it runs on the Play phone.
+      base + splits are copied to the capture phone and the app starts there. A licensed app
+      also needs Google Play on that phone, which the first launch installs.
 - [ ] Split-APK check: Play installs splits for ABI/density/language. Both phones are
       `pixel_7` and the same ABI, so splits should match. Confirm with one big app.
 - [ ] USB test with a real phone (USB debugging on).

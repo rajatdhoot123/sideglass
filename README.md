@@ -29,9 +29,10 @@ left; the phone is on the right, and you click and drag on it to use it.
   - **From my phone:** pick an app on a USB-connected phone (USB debugging on) to copy it over.
   - **APK file:** drop APKs on the phone (split APKs together).
 - **Launch** an installed app from the list.
-- Apps that declare Google Play licensing, including PairIP-protected apps, run on the Play
-  phone where their Play Store license can be checked. Their traffic bypasses Sideglass's
-  capture proxy; apps without this requirement run on the capture phone as usual.
+- **Apps that check their Google Play licence** (PairIP, LVL): the first launch puts the real
+  Play Store on the capture phone (copied from the Play phone, kept in its writable system), so
+  the app runs where its traffic is captured. Sign in to Google Play there once with the account
+  that has the app.
 - **Logs:** logcat, filtered to the launched app.
 - **Test SMS:** send an SMS from any sender to the phone.
 - **Export HAR** for Chrome DevTools, Charles, Insomnia and the like.
@@ -63,11 +64,11 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 
 ## Limits
 
-- Google Play system images cannot be rooted, so the capture phone has no Play Store; the
-  separate Play phone downloads apps for it. Paid apps and apps Google does not offer on that
-  phone cannot be fetched.
-- Apps that require a Google Play license must be installed from Play Store on the Play phone
-  and run there. Their requests are not captured by Sideglass.
+- Google Play system images cannot be rooted, so apps are downloaded on a separate Play phone.
+  The first launch of an app that checks a Play licence copies that Play Store onto the capture
+  phone. Paid apps and apps Google does not offer on the Play phone cannot be fetched.
+- Signing in to Google Play on the capture phone goes through the capture proxy. A host that
+  refuses the proxy shows under Refused TLS and the sign-in cannot finish until that is bypassed.
 - Apps that pin certificates refuse the proxy (listed under Refused TLS). Bypassing that
   with Frida is planned.
 - Apps that detect root or emulators may refuse to run.

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
 import { CAPTURE_PHONE, ensureAvd, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
 import { installApks, isPackageName, pullApp } from './store/apk'
+import { hasPlayStore, installPlayStore, needsPlayLicense, pullPlayStore } from './playstore'
 import { FEATURED, installFromFdroid, search as searchFdroid } from './store/fdroid'
 import { packageFromPlayLink, PlayHelper } from './store/play'
 import { usbPhones, userApps } from './store/usb'
@@ -70,29 +71,87 @@ export class Session extends EventEmitter {
     this.emulator = emu
     await this.step('root', 'Getting root on the virtual phone', () => emu.adb.root())
     await this.step('trust', 'Installing certificate as a system CA', async () => {
-      await installSystemCa(emu.adb, ca)
+      await this.trust(emu.adb, ca)
       this.log(`Android API ${await sdkVersion(emu.adb)}: CA ${ca.androidName} trusted`)
     })
+    await this.attachScreen(emu.adb)
+    this.logcat = new Logcat(emu.adb)
+    this.logcat.on('lines', (lines) => this.emit('logcat', lines))
+    this.logcat.start()
+    this.progress('ready', 'done', 'Ready')
+  }
+
+  /** Trust our CA in the system store and in Chrome. Needed after every boot (the CA mount is tmpfs). */
+  private async trust(adb: Adb, ca: CaFiles): Promise<void> {
+    await installSystemCa(adb, ca)
     // Chrome uses its own root list, not the system store: tell it to accept our CA's key,
     // and skip its welcome and sign-in screens, which get in the way of a test phone.
     const spki = await generateSPKIFingerprint(ca.cert)
     const flags = `chrome --disable-fre --no-default-browser-check --no-first-run --ignore-certificate-errors-spki-list=${spki}`
-    await emu.adb
+    await adb
       .shell(
         `echo '${flags}' > /data/local/tmp/chrome-command-line && chmod 644 /data/local/tmp/chrome-command-line` +
           ' && am set-debug-app --persistent com.android.chrome && am force-stop com.android.chrome',
       )
       .catch(() => undefined)
-    this.screen = new Mirror(emu.adb, join(this.dataDir, 'scrcpy'), 1)
-    this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
-    this.screen.on('video', (packet) => this.emit('video', packet))
-    this.screen.on('mode', (mode) => this.emit('screen-mode', mode))
-    this.screen.on('log', (line: string) => this.log(line))
-    await this.screen.start()
-    this.logcat = new Logcat(emu.adb)
-    this.logcat.on('lines', (lines) => this.emit('logcat', lines))
-    this.logcat.start()
-    this.progress('ready', 'done', 'Ready')
+  }
+
+  private playStoreSetup: Promise<void> | null = null
+
+  /**
+   * Give the capture phone the real Play Store so apps that check their Google Play licence
+   * (PairIP and LVL) can run there, with their traffic captured. Takes a few minutes once.
+   */
+  private ensurePlayStore(): Promise<void> {
+    this.playStoreSetup ??= this.setUpPlayStore().finally(() => {
+      this.playStoreSetup = null
+    })
+    return this.playStoreSetup
+  }
+
+  private async setUpPlayStore(): Promise<void> {
+    const adb = this.requireAdb()
+    if (await hasPlayStore(adb)) return
+    const say = (line: string) => this.emit('store-log', line)
+    say('This app checks its Google Play licence. Copying Google Play from the Play phone (first time only)…')
+    const files = await pullPlayStore(await this.playHelper().start(), join(this.dataDir, 'playstore'))
+    this.logcat?.stop()
+    this.screen?.stop()
+    try {
+      await installPlayStore(adb, files, say)
+      await adb.root()
+      await this.trust(adb, this.ca!)
+    } finally {
+      this.logcat = new Logcat(adb)
+      this.logcat.on('lines', (lines) => this.emit('logcat', lines))
+      this.logcat.start()
+      await this.attachScreen(adb)
+    }
+    say('Google Play is on the capture phone.')
+  }
+
+  private playHelper(): PlayHelper {
+    if (!this.play) {
+      this.play = new PlayHelper(this.sdk!, join(this.dataDir, 'scrcpy'))
+      this.play.on('log', (l) => this.emit('store-log', l))
+      this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
+      this.play.on('video', (packet) => this.emit('play-video', packet))
+      this.play.on('screen-mode', (mode) => this.emit('play-screen-mode', mode))
+      this.play.on('stage', (st) => this.emit('play-stage', st))
+    }
+    return this.play
+  }
+
+  /** The scrcpy server dies across a reboot, so the picture has to be opened again. */
+  private async attachScreen(adb: Adb): Promise<void> {
+    this.screen?.stop()
+    const screen = new Mirror(adb, join(this.dataDir, 'scrcpy'), 1)
+    screen.on('frame', (png: Buffer) => this.emit('frame', png))
+    screen.on('video', (packet) => this.emit('video', packet))
+    screen.on('mode', (mode) => this.emit('screen-mode', mode))
+    screen.on('log', (line: string) => this.log(line))
+    this.screen = screen
+    await screen.start()
   }
 
   play: PlayHelper | null = null
@@ -143,7 +202,8 @@ export class Session extends EventEmitter {
     this.emit('store-log', installed ? `${pkg} is already on the Play phone` : `Tap Install on the Play phone for ${pkg}`)
     const apks = await play.waitAndPull(pkg, join(this.downloads, 'play'), undefined, () => this.playCancelled)
     this.emit('store-log', `Copying ${apks.length} APK file(s) to the capture phone…`)
-    const result = await installApks(this.requireAdb(), apks)
+    // Record Google Play as the installer, as on a real phone; licence checks look at it.
+    const result = await installApks(this.requireAdb(), apks, 'com.android.vending')
     this.emit('store-log', `${pkg}: ${result}`)
     this.emit('play-stage', { stage: 'done', message: `${pkg} is on the capture phone.` })
     return pkg
@@ -182,48 +242,24 @@ export class Session extends EventEmitter {
   async launch(pkg: string): Promise<LaunchResult> {
     if (!isPackageName(pkg)) throw new Error(`Invalid package name: ${pkg}`)
     const adb = this.requireAdb()
-    const metadata = await adb.shell(`dumpsys package ${pkg}`).catch(() => '')
-    if (/com\.android\.vending\.CHECK_LICENSE\b|com\.pairip\.licensecheck\./i.test(metadata)) {
-      if (this.playRunning) {
-        throw new Error(`Already getting ${this.playRunning} on the Play phone. Cancel it first.`)
-      }
-      const play = this.playHelper()
-      await play.start()
-      if (!(await play.isInstalledFromPlay(pkg))) {
-        if (await play.isInstalled(pkg)) {
-          throw new Error(`${pkg} requires a Play Store license, but its copy on the Play phone was not installed by Google Play.`)
-        }
-        await play.openStoreListing(pkg)
-        return {
-          device: 'play',
-          pid: null,
-          message: `${pkg} requires a Google Play license. Install it from the Play Store on this phone, then launch it again.`,
-        }
-      }
-      const pid = await play.launch(pkg)
-      return {
-        device: 'play',
-        pid,
-        message: `${pkg} is running on the Play phone so its Google Play license remains valid. Its traffic is not routed through Sideglass capture.`,
+    let message: string | undefined
+    if (needsPlayLicense(await adb.shell(`dumpsys package ${pkg}`).catch(() => ''))) {
+      await this.ensurePlayStore()
+      const account = /Account \{name=[^,]+, type=com\.google\}/.test(await adb.shell('dumpsys account').catch(() => ''))
+      if (!account) {
+        message = `${pkg} checks its Google Play licence: sign in to Google Play on this phone with the account that has the app.`
       }
     }
+    // `monkey` aborts when any other process crashes, which the emulator's Bluetooth stack does after a reboot.
+    const resolved = await adb.shell(
+      `cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER ${pkg}`,
+    )
+    const component = resolved.trim().split('\n').pop()?.trim() ?? ''
+    if (!component.startsWith(`${pkg}/`)) throw new Error(`${pkg} has no launcher activity`)
     await adb.shell(`am force-stop ${pkg}`)
-    await adb.shell(`monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`)
-    await new Promise((resolve) => setTimeout(resolve, 1200))
-    const out = (await adb.shell(`pidof ${pkg}`).catch(() => '')).trim()
-    return { device: 'capture', pid: out ? Number(out.split(/\s+/)[0]) : null }
-  }
-
-  private playHelper(): PlayHelper {
-    if (!this.play) {
-      this.play = new PlayHelper(this.sdk!, join(this.dataDir, 'scrcpy'))
-      this.play.on('log', (l) => this.emit('store-log', l))
-      this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
-      this.play.on('video', (packet) => this.emit('play-video', packet))
-      this.play.on('screen-mode', (mode) => this.emit('play-screen-mode', mode))
-      this.play.on('stage', (st) => this.emit('play-stage', st))
-    }
-    return this.play
+    await adb.shell(`am start -n '${component}'`)
+    await new Promise((r) => setTimeout(r, 1500))
+    return { device: 'capture', pid: await this.pidOf(pkg), message }
   }
 
   async pidOf(pkg: string): Promise<number | null> {

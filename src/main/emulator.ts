@@ -196,7 +196,8 @@ export async function startEmulator(
   const args = ['-avd', spec.avd, '-port', String(spec.port), '-no-window', '-no-boot-anim', '-no-audio', '-gpu', 'auto']
   if (coldBoot) args.push('-no-snapshot-load')
   // The capture phone always cold-boots into a clean state; the Play phone keeps its sign-in.
-  if (proxyPort) args.push('-no-snapshot-save', '-http-proxy', `http://127.0.0.1:${proxyPort}`)
+  // -writable-system keeps the Play Store that replaces the LicenseChecker stub.
+  if (proxyPort) args.push('-no-snapshot-save', '-writable-system', '-http-proxy', `http://127.0.0.1:${proxyPort}`)
   const child = await bootEmulator(sdk, spec, log, args)
   log(`${serial} booted`)
   return { serial, process: child, adb: new Adb(sdk.adb, serial), coldBoot }

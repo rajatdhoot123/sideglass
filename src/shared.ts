@@ -9,6 +9,7 @@ export type Device = 'capture' | 'play'
 export interface LaunchResult {
   device: Device
   pid: number | null
+  /** Something the user has to do, shown instead of the usual status. */
   message?: string
 }
 export type ScreenMode = 'video' | 'frames'
