@@ -3,7 +3,7 @@ import { generateSPKIFingerprint } from 'mockttp'
 import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
 import { CAPTURE_PHONE, ensureAvd, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
-import { installApks, pullApp } from './store/apk'
+import { installApks, isPackageName, pullApp } from './store/apk'
 import { FEATURED, installFromFdroid, search as searchFdroid } from './store/fdroid'
 import { packageFromPlayLink, PlayHelper } from './store/play'
 import { usbPhones, userApps } from './store/usb'
@@ -12,6 +12,7 @@ import { Logcat } from './logcat'
 import { CaptureProxy } from './proxy'
 import { Mirror } from './mirror'
 import { findSdk, type Sdk } from './sdk'
+import type { LaunchResult } from '../shared'
 
 export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'root' | 'trust' | 'ready'
 export interface Progress {
@@ -135,19 +136,12 @@ export class Session extends EventEmitter {
   }
 
   private async runPlay(pkg: string): Promise<string> {
-    if (!this.play) {
-      this.play = new PlayHelper(this.sdk!, join(this.dataDir, 'scrcpy'))
-      this.play.on('log', (l) => this.emit('store-log', l))
-      this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
-      this.play.on('video', (packet) => this.emit('play-video', packet))
-      this.play.on('screen-mode', (mode) => this.emit('play-screen-mode', mode))
-      this.play.on('stage', (st) => this.emit('play-stage', st))
-    }
+    const play = this.playHelper()
     this.playCancelled = false
     this.emit('store-log', 'Starting the Play Store phone (first time: sign in with your Google account)…')
-    const installed = await this.play.open(pkg)
+    const installed = await play.open(pkg)
     this.emit('store-log', installed ? `${pkg} is already on the Play phone` : `Tap Install on the Play phone for ${pkg}`)
-    const apks = await this.play.waitAndPull(pkg, join(this.downloads, 'play'), undefined, () => this.playCancelled)
+    const apks = await play.waitAndPull(pkg, join(this.downloads, 'play'), undefined, () => this.playCancelled)
     this.emit('store-log', `Copying ${apks.length} APK file(s) to the capture phone…`)
     const result = await installApks(this.requireAdb(), apks)
     this.emit('store-log', `${pkg}: ${result}`)
@@ -185,10 +179,48 @@ export class Session extends EventEmitter {
   }
 
   /** Restart an app so it starts in a process that sees our CA. */
-  async launch(pkg: string): Promise<void> {
+  async launch(pkg: string): Promise<LaunchResult> {
+    if (!isPackageName(pkg)) throw new Error(`Invalid package name: ${pkg}`)
     const adb = this.requireAdb()
+    const metadata = await adb.shell(`dumpsys package ${pkg}`).catch(() => '')
+    if (/com\.android\.vending\.CHECK_LICENSE\b|com\.pairip\.licensecheck\./i.test(metadata)) {
+      const play = this.playHelper()
+      await play.start()
+      if (!(await play.isInstalledFromPlay(pkg))) {
+        if (await play.isInstalled(pkg)) {
+          throw new Error(`${pkg} requires a Play Store license, but its copy on the Play phone was not installed by Google Play.`)
+        }
+        await play.openStoreListing(pkg)
+        return {
+          device: 'play',
+          pid: null,
+          message: `${pkg} requires a Google Play license. Install it from the Play Store on this phone, then launch it again.`,
+        }
+      }
+      const pid = await play.launch(pkg)
+      return {
+        device: 'play',
+        pid,
+        message: `${pkg} is running on the Play phone so its Google Play license remains valid. Its traffic is not routed through Sideglass capture.`,
+      }
+    }
     await adb.shell(`am force-stop ${pkg}`)
     await adb.shell(`monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`)
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    const out = (await adb.shell(`pidof ${pkg}`).catch(() => '')).trim()
+    return { device: 'capture', pid: out ? Number(out.split(/\s+/)[0]) : null }
+  }
+
+  private playHelper(): PlayHelper {
+    if (!this.play) {
+      this.play = new PlayHelper(this.sdk!, join(this.dataDir, 'scrcpy'))
+      this.play.on('log', (l) => this.emit('store-log', l))
+      this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
+      this.play.on('video', (packet) => this.emit('play-video', packet))
+      this.play.on('screen-mode', (mode) => this.emit('play-screen-mode', mode))
+      this.play.on('stage', (st) => this.emit('play-stage', st))
+    }
+    return this.play
   }
 
   async pidOf(pkg: string): Promise<number | null> {

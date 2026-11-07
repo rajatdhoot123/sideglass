@@ -17,6 +17,10 @@ export function DeviceScreen({ device, className }: { device: Device; className?
   const moving = useRef(false)
 
   useEffect(() => {
+    // Drop the previous phone's picture immediately. Taps already go to [device].
+    setSrc(null)
+    setLive(false)
+    liveRef.current = false
     const canvas = canvasRef.current
     if (!canvas) return
     let disposed = false

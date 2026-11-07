@@ -1,9 +1,18 @@
 import { useEffect, useState } from 'react'
+import type { Device, LaunchResult } from '../../shared'
 import { AddApp } from './AddApp'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
 
 /** The live phone: frames from the device; clicks and drags become taps and swipes. */
-export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void }) {
+export function Phone({
+  activeDevice,
+  onActiveDevice,
+  onLaunched,
+}: {
+  activeDevice: Device
+  onActiveDevice: (device: Device) => void
+  onLaunched: (pid: number | null) => void
+}) {
   const [adding, setAdding] = useState(false)
   const [apps, setApps] = useState<string[]>([])
   const [status, setStatus] = useState('')
@@ -11,6 +20,13 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
   const [smsText, setSmsText] = useState('Rs.500.00 debited from A/c XX1234 on 07-11-26 to ZOMATO. UPI Ref 512345678901')
   const [dragging, setDragging] = useState(false)
   useEffect(() => void window.api.apps().then(setApps), [])
+
+  const showLaunch = (pkg: string, result: LaunchResult, idle: string) => {
+    onActiveDevice(result.device)
+    // Logcat is the capture phone. A Play-phone pid would filter it to the wrong process.
+    onLaunched(result.device === 'capture' ? result.pid : null)
+    setStatus(result.message ?? (result.pid ? `${pkg} running (pid ${result.pid})` : idle))
+  }
 
   const install = async (files: FileList) => {
     const paths = [...files].map((f) => window.api.pathForFile(f)).filter((p) => p.endsWith('.apk'))
@@ -45,9 +61,11 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
           onChange={async (e) => {
             if (!e.target.value) return
             setStatus(`Starting ${e.target.value}…`)
-            const pid = await window.api.launch(e.target.value)
-            onLaunched(pid)
-            setStatus(pid ? `${e.target.value} running (pid ${pid})` : `${e.target.value} did not start`)
+            try {
+              showLaunch(e.target.value, await window.api.launch(e.target.value), `${e.target.value} did not start`)
+            } catch (error) {
+              setStatus(`Could not start ${e.target.value}: ${(error as Error).message}`)
+            }
           }}
         >
           <option value="">Launch app…</option>
@@ -56,6 +74,17 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
           ))}
         </select>
         <button onClick={() => void window.api.apps().then(setApps)}>↻</button>
+        {activeDevice === 'play' && (
+          <button
+            onClick={() => {
+              onActiveDevice('capture')
+              onLaunched(null)
+              setStatus('Showing the capture phone.')
+            }}
+          >
+            Capture phone
+          </button>
+        )}
         <button className="primary" onClick={() => setAdding(true)}>
           + Add app
         </button>
@@ -66,20 +95,22 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
           onInstalled={async (pkg, open) => {
             setApps(await window.api.apps())
             if (!pkg || !open) return
-            // Hand back to the capture phone: close the dialog and open the new app.
+            // Close the dialog and open the app on the device that can run it.
             setAdding(false)
             setStatus(`Starting ${pkg}…`)
-            const pid = await window.api.launch(pkg)
-            onLaunched(pid)
-            setStatus(pid ? `${pkg} running (pid ${pid})` : `${pkg} installed; it did not start by itself`)
+            try {
+              showLaunch(pkg, await window.api.launch(pkg), `${pkg} installed; it did not start by itself`)
+            } catch (error) {
+              setStatus(`Could not start ${pkg}: ${(error as Error).message}`)
+            }
           }}
         />
       )}
-      <DeviceScreen device="capture" />
-      <NavKeys device="capture" />
-      <TypeBar device="capture" />
+      <DeviceScreen device={activeDevice} />
+      <NavKeys device={activeDevice} />
+      <TypeBar device={activeDevice} />
       <details className="sms">
-        <summary>Send a test SMS</summary>
+        <summary>{activeDevice === 'play' ? 'Send a test SMS to the capture phone' : 'Send a test SMS'}</summary>
         <input value={smsFrom} onChange={(e) => setSmsFrom(e.target.value)} />
         <textarea value={smsText} onChange={(e) => setSmsText(e.target.value)} rows={3} />
         <button onClick={() => void window.api.sendSms(smsFrom, smsText).then(() => setStatus('SMS sent'))}>Send</button>
