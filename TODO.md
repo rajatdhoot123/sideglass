@@ -1,6 +1,7 @@
 # Sideglass: handoff and TODO
 
-Status as of 2026-11-07. Repo: https://github.com/rajatdhoot123/sideglass (public, Apache-2.0).
+Status updated 2026-11-07, after PRs #4, #5, #6 and #8 merged.
+Repo: https://github.com/rajatdhoot123/sideglass (public, Apache-2.0).
 Local folder on the original machine: `~/project/build-with-me`.
 
 ## 1. What Sideglass is
@@ -14,13 +15,18 @@ Use it on apps you build or are allowed to test. Keep it local only, with no clo
 
 ## 2. State of the code
 
-| Branch | State | Contents |
-|---|---|---|
-| `main` | pushed | v0.1: setup, proxy, system CA, live phone (screencap frames), Requests / Logs / Refused TLS tabs, APK drop, launch app, logcat, test SMS, HAR export. Renamed Sideglass. |
-| `feat/add-apps` | **PR #1 merged into main (2026-11-07)** | **+ Add app** window: F-Droid store, Play Store link (second Play phone), USB phone, APK file. Tested headless (`scripts/apps.mts`). |
-| `feat/scrcpy-stream` | draft PR #2 (base `main`) | H.264 scrcpy stream, real touch and keyboard, screenshot fallback. See 4.1. |
+`main` has the v0.1 capture app (setup, proxy, system CA, Requests / Logs / Refused TLS, APK drop, launch, logcat, test SMS, HAR) plus the rows below. Draft PR #2 only added this handoff and the Tango packages; PR #4 contains it and the stream. Do not continue `feat/scrcpy-stream`.
 
-PR #1 is merged; continue on `feat/scrcpy-stream`.
+| PR | What landed |
+|---|---|
+| #1 | **+ Add app:** F-Droid, a Play Store link (second phone), a USB phone, an APK file. Headless check: `scripts/apps.mts`. |
+| #3 | Play hand-over: Sideglass taps Install and stops only when the user must act. |
+| #4 | Roadmap 4.1. H.264 scrcpy stream, real touch, scroll and keyboard, screenshot fallback, on both phones. |
+| #5 | The Play helper AVD gets `PlayStore.enabled=yes`. A running helper that still has Play off is restarted after its AVD lock is released. Cold boot only when that flag was off. |
+| #6 | Apps that declare Play licensing, including PairIP, launch on the Play phone. The view can switch back to the capture phone. Capture logcat is not filtered with a Play-phone pid. |
+| #8 | Test SMS goes to the phone on screen. A licensed launch waits while a Play install is in progress. One shared Play-phone startup. |
+
+Next roadmap item is **4.2 Frida certificate unpinning**. 4.3–4.6 are not started.
 
 ### Layout
 
@@ -28,11 +34,13 @@ PR #1 is merged; continue on `feat/scrcpy-stream`.
 src/main/            Electron main process (Node)
   index.ts           window + IPC handlers; SIDEGLASS_SNAPSHOT=/x.png saves window screenshots every 3s
   session.ts         setup steps in order (sdk → ca → proxy → avd → boot → root → trust → ready),
-                     app install/launch, Play/USB/F-Droid entry points
+                     app install/launch, Play/USB/F-Droid entry points. Licensed and PairIP
+                     apps launch on the Play phone instead of the capture phone
   sdk.ts             finds the Android SDK (ANDROID_HOME, Android Studio, Homebrew, ~/.sideglass/android-sdk)
   adb.ts             adb CLI wrapper (exec, shell, root, waitForBoot, screenSize)
   emulator.ts        PhoneSpec: CAPTURE_PHONE (google_apis, port 5590, rooted, -http-proxy)
-                     and PLAY_PHONE (google_apis_playstore, port 5592, not rooted); ensureAvd, start, stop
+                     and PLAY_PHONE (google_apis_playstore, port 5592, not rooted); ensureAvd, start, stop.
+                     Repairs `PlayStore.enabled` in the Play AVD config before boot
   certificate.ts     CA create/load; installSystemCa: tmpfs over /system/etc/security/cacerts and
                      bind mount over /apex/com.android.conscrypt/cacerts in EVERY mount namespace
   proxy.ts           mockttp proxy: Exchange records, bodies (2 MB cap), TLS refusals, 5000-row cap
@@ -43,7 +51,8 @@ src/main/            Electron main process (Node)
   har.ts             HAR 1.2 export
   store/apk.ts       pm path / pull / install(-multiple); replaces differently signed user copies
   store/fdroid.ts    F-Droid search API + featured list + install (retries other ABI builds)
-  store/play.ts      PlayHelper: second phone, open market:// link, wait for install, pull splits
+  store/play.ts      PlayHelper: second phone, open market:// link, wait for install, pull splits.
+                     Also checks the Play installer and launches that copy for licensed apps
   store/usb.ts       list USB phones and their user apps
 src/preload/index.ts contextBridge `window.api`
 src/shared.ts        Api type shared by preload and renderer
@@ -96,22 +105,27 @@ run downloads `system-images;android-35;google_apis;<abi>`; the Play flow also d
 - mockttp prints `SSLV3_ALERT_CERTIFICATE_UNKNOWN` stack traces to stdout when a pinned
   client refuses. Silence or route them into Refused TLS.
 - Requests are not tagged with the app that made them, so the list mixes all apps.
-- The Add-app dialog UI was only type-checked and built, not clicked through. Do a manual pass.
+- The Store tab of Add app was clicked through. The Play, USB and APK-file tabs were not.
 - Not tested: a real Google sign-in and Install on the Play phone; a real USB phone.
+- Licensed apps run on the Play phone, so their requests never reach the capture proxy.
+  4.2 and 4.3 do not cover that phone until those designs say so.
 
 ## 3. Add apps: checks still open after merge
 
 - [x] UI pass of the Store tab over CDP: featured list renders, Install (Tasks, AntennaPod) → Success.
 - [ ] UI pass of the Play, USB and APK-file tabs by hand.
 - [ ] Real Play test: sign in on the Play phone, install a free app (e.g. Wikipedia), and confirm
-      base + splits are copied and the app starts on the capture phone.
+      base + splits are copied to the capture phone. Launch stays on the capture phone unless
+      the app declares a Play license, in which case it runs on the Play phone.
 - [ ] Split-APK check: Play installs splits for ABI/density/language. Both phones are
       `pixel_7` and the same ABI, so splits should match. Confirm with one big app.
 - [ ] USB test with a real phone (USB debugging on).
 
 ## 4. Roadmap (do in this order, one PR each)
 
-### 4.1 Smooth video and real input (scrcpy via Tango). Branch `feat/scrcpy-stream`
+### 4.1 Smooth video and real input (scrcpy via Tango). Shipped in PR #4
+
+Draft PR #2 is included in #4. The branch `feat/scrcpy-stream` is finished.
 
 Goal: replace the `screencap` loop (~5 fps) with a 30–60 fps H.264 stream, with real touch
 (press, move, release, long-press, multi-touch) and keyboard.
@@ -143,11 +157,12 @@ Plan:
       (keydown/keyup when the canvas has focus), `injectText`, `backOrScreenOn`.
 - [x] **Fallback:** keep `screen.ts` (screencap) and use it if scrcpy fails to start.
 - [x] Do the same for the Play phone in the Add-app dialog.
-- [ ] **Done when:** scrolling a list in Chrome is smooth, typing on the Mac keyboard types on
-      the phone, and `npm run smoke` still passes. Checked on the already-running capture phone:
-      server 3.3.3, 576×1280 H.264, packets kept flowing (~21 fps while that emulator was busy),
-      and tap, scroll, and Home were injected. `npm run smoke` was not re-run: it would `adb root`
-      the live `emulator-5590`. The phone picture in the window was not clicked through.
+- [x] Shipped in PR #4 and merged.
+- [ ] Still to confirm: scrolling a list in the window is smooth, typing on the Mac keyboard
+      types on the phone, and `npm run smoke` still passes. On the capture phone already running,
+      server 3.3.3 produced 576×1280 H.264 and tap, scroll and Home were injected. `npm run smoke`
+      was not re-run, because it would `adb root` that live phone. The picture in the window was
+      not clicked through.
 
 ### 4.2 Frida certificate unpinning
 
