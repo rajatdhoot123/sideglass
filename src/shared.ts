@@ -62,7 +62,7 @@ export interface Api {
   pathForFile(file: File): string
   apps(): Promise<string[]>
   launch(pkg: string): Promise<LaunchResult>
-  sendSms(from: string, text: string): Promise<void>
+  sendSms(device: Device, from: string, text: string): Promise<void>
   exportHar(): Promise<string | null>
   on(channel: 'progress', cb: (p: Progress) => void): () => void
   on(channel: 'setup-log', cb: (line: string) => void): () => void
