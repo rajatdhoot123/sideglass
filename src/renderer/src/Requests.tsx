@@ -31,20 +31,33 @@ function Headers({ headers }: { headers?: Record<string, string | string[] | und
   )
 }
 
-export function Requests({ list }: { list: ExchangeSummary[] }) {
+const shortApp = (pkg?: string) => (pkg ? (pkg.split('.').pop() ?? pkg) : '')
+
+export function Requests({ list, focusApp }: { list: ExchangeSummary[]; focusApp: string | null }) {
   const [filter, setFilter] = useState('')
   const [hideGoogle, setHideGoogle] = useState(true)
+  const [app, setApp] = useState('__all__')
+  /** True after the user picks a package. Until then, untagged rows stay visible. */
+  const [picked, setPicked] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [detail, setDetail] = useState<Exchange | null>(null)
   const [pane, setPane] = useState<'response' | 'request' | 'headers'>('response')
+  const apps = useMemo(() => [...new Set(list.map((e) => e.app).filter((name): name is string => !!name))].sort(), [list])
+
+  useEffect(() => {
+    if (!focusApp) return
+    setApp(focusApp)
+    setPicked(false)
+  }, [focusApp])
 
   const rows = useMemo(() => {
     const f = filter.toLowerCase()
     return list
+      .filter((e) => app === '__all__' || e.app === app || (!picked && !e.app))
       .filter((e) => !hideGoogle || !/(^|\.)(google(apis)?\.com|gstatic\.com|gvt1\.com|googleusercontent\.com)$/.test(e.host.replace(/:\d+$/, '')))
       .filter((e) => !f || e.url.toLowerCase().includes(f) || e.method.toLowerCase() === f || String(e.status) === f)
       .slice(-1500)
-  }, [list, filter, hideGoogle])
+  }, [list, filter, hideGoogle, app, picked])
 
   const current = selected ? list.find((e) => e.id === selected) : undefined
   useEffect(() => {
@@ -59,12 +72,29 @@ export function Requests({ list }: { list: ExchangeSummary[] }) {
         <label>
           <input type="checkbox" checked={hideGoogle} onChange={(e) => setHideGoogle(e.target.checked)} /> Hide Google system traffic
         </label>
+        <select
+          value={app}
+          aria-label="App"
+          onChange={(e) => {
+            setPicked(true)
+            setApp(e.target.value)
+          }}
+        >
+          <option value="__all__">All apps</option>
+          {focusApp && !apps.includes(focusApp) && <option value={focusApp}>{shortApp(focusApp)}</option>}
+          {apps.map((name) => (
+            <option key={name} value={name}>
+              {shortApp(name)}
+            </option>
+          ))}
+        </select>
       </div>
       <div className="table">
         <div className="row head">
           <span>Time</span>
           <span>Method</span>
           <span>Status</span>
+          <span>App</span>
           <span>Host</span>
           <span>Path</span>
           <span>Size</span>
@@ -80,6 +110,9 @@ export function Requests({ list }: { list: ExchangeSummary[] }) {
               <span>{time(e.startedAt)}</span>
               <span className="method">{e.method}</span>
               <span>{e.state === 'aborted' ? 'aborted' : (e.status ?? '…')}</span>
+              <span className="appname" title={e.app ?? ''}>
+                {shortApp(e.app)}
+              </span>
               <span className="host">{e.host}</span>
               <span className="path" title={e.url}>
                 {e.path}
@@ -88,7 +121,9 @@ export function Requests({ list }: { list: ExchangeSummary[] }) {
               <span>{e.durationMs !== undefined ? `${e.durationMs} ms` : ''}</span>
             </div>
           ))}
-          {rows.length === 0 && <div className="empty">Use an app on the phone. Its requests show up here.</div>}
+          {rows.length === 0 && (
+            <div className="empty">{app === '__all__' ? 'Use an app on the phone. Its requests show up here.' : `No requests for ${shortApp(app)} yet.`}</div>
+          )}
         </div>
       </div>
       {detail && (

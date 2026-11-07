@@ -1,10 +1,11 @@
 import type { LogLine } from './main/logcat'
+import type { PhoneInput } from './main/timeline'
 import type { ExchangeSummary, Exchange, TlsFailure } from './main/proxy'
 import type { Progress } from './main/session'
 import type { StoreApp } from './main/store/fdroid'
 import type { UsbPhone } from './main/store/usb'
 
-export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone }
+export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput }
 export type Device = 'capture' | 'play'
 /** Which phone Sideglass captures: its own rooted emulator, or the user's phone over USB. */
 export type PhoneMode = 'virtual' | 'usb'
@@ -52,13 +53,14 @@ export interface Api {
   openCertificateSettings(): Promise<void>
   getExchange(id: string): Promise<Exchange | null>
   clear(): Promise<void>
-  tap(device: Device, x: number, y: number): Promise<void>
-  swipe(device: Device, x1: number, y1: number, x2: number, y2: number, ms: number): Promise<void>
-  key(device: Device, code: 'BACK' | 'HOME' | 'APP_SWITCH' | 'POWER'): Promise<void>
-  text(device: Device, value: string): Promise<void>
-  touch(device: Device, action: 'down' | 'move' | 'up' | 'cancel', pointerId: number, x: number, y: number): Promise<void>
-  scroll(device: Device, x: number, y: number, dx: number, dy: number): Promise<void>
-  keyEvent(device: Device, event: KeyEvent): Promise<void>
+  tap(device: Device, x: number, y: number): Promise<string | null>
+  swipe(device: Device, x1: number, y1: number, x2: number, y2: number, ms: number): Promise<string | null>
+  key(device: Device, code: 'BACK' | 'HOME' | 'APP_SWITCH' | 'POWER'): Promise<string | null>
+  text(device: Device, value: string): Promise<string | null>
+  touch(device: Device, action: 'down' | 'move' | 'up' | 'cancel', pointerId: number, x: number, y: number): Promise<string | null>
+  scroll(device: Device, x: number, y: number, dx: number, dy: number): Promise<string | null>
+  keyEvent(device: Device, event: KeyEvent): Promise<string | null>
+  inputShot(id: string, jpeg: string): Promise<void>
   refreshVideo(device: Device): Promise<void>
   useFrames(device: Device): Promise<void>
   screenState(): Promise<Record<Device, ScreenMode>>
@@ -86,6 +88,7 @@ export interface Api {
   on(channel: 'store-log', cb: (line: string) => void): () => void
   on(channel: 'play-stage', cb: (stage: { stage: 'needs-user' | 'installing' | 'copying' | 'done'; message: string }) => void): () => void
   on(channel: 'logcat', cb: (lines: LogLine[]) => void): () => void
+  on(channel: 'input', cb: (input: PhoneInput) => void): () => void
 }
 
 declare global {

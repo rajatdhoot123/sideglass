@@ -198,26 +198,27 @@ The proxy only sees TCP from the emulator, not the app. Options, best first:
       header (hook OkHttp / HttpURLConnection) or reports socket connects (hook
       `connect()`, sending (pkg, local port)). The proxy matches by source port and strips the
       header before forwarding.
-- [ ] **B (no Frida):** poll `/proc/net/tcp` and `tcp6` on the phone (root) every ~200 ms for
-      UIDs, map UID → package with `pm list packages -U`, and match the emulator's outbound
-      connection to proxy source ports. The emulator NAT makes this hard; A is simpler.
-- [ ] **UI:** an App column and an app filter dropdown in Requests. Default to the launched app.
+- [x] **B (no Frida), shipped:** the virtual phone polls `/proc/net/tcp` and `tcp6` (root)
+      and `pm list packages -U`. A request is tagged when one app uid has a socket to that
+      address, or when the launched app does. Several apps on the same address stay blank.
+      USB phones are not tagged.
+- [x] **UI:** an App column and an app filter dropdown in Requests. It follows the last launched app.
 
 ### 4.4 Timeline: tap → requests
 
-- [ ] Record every input event (tap/swipe/key/text) with a timestamp in the main process.
-- [ ] In Requests, group requests that start within ~2 s after an input under that input
-      ("Tap at 540,1200 → 4 requests"). Add a Timeline view: a vertical list of inputs, each
-      expandable to its requests, plus a thumbnail of the screen frame at that moment.
-- [ ] Include the timeline in the HAR export (custom `_sideglass` fields).
+- [x] Record every input event (tap/swipe/key/text) with a timestamp in the main process.
+      Scrolls are collapsed so a flick is one entry. A Timeline tab lists them, each
+      expandable to the requests that started within two seconds, with a thumbnail when the
+      phone picture can provide one.
+- [x] Include the timeline in the HAR export (custom `_sideglass` fields).
 
 ### 4.5 gRPC and protobuf
 
-- [ ] Detect `content-type: application/grpc*` and `application/x-protobuf`.
-- [ ] Parse gRPC framing (5-byte header: compressed flag + length) and gunzip compressed frames.
-- [ ] Decode protobuf **without a schema** (field numbers, wire types, nested messages,
-      strings) and show it as a tree. Optionally let the user load a `.proto` and decode with
-      `protobufjs`.
+- [x] Detect `content-type: application/grpc*` and `application/x-protobuf`.
+- [x] Parse gRPC framing (5-byte header: compressed flag + length) and gunzip compressed frames.
+- [x] Decode protobuf **without a schema** (field numbers, wire types, nested messages,
+      strings) and show it as a tree in the request and response body.
+- [ ] Optionally let the user load a `.proto` and decode with `protobufjs`.
 - [ ] Firestore and Google APIs traffic is the main test case.
 
 ### 4.6 Product polish (after the roadmap)
