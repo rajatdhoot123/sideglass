@@ -7,6 +7,9 @@ const invoke =
 
 contextBridge.exposeInMainWorld('api', {
   start: invoke('session:start'),
+  settings: invoke('settings:get'),
+  saveSettings: invoke('settings:save'),
+  openCertificateSettings: invoke('cert:open-settings'),
   getExchange: invoke('exchange:get'),
   clear: invoke('capture:clear'),
   tap: invoke('screen:tap'),

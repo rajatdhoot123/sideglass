@@ -1,14 +1,16 @@
 import { useEffect, useState } from 'react'
-import type { Device, LaunchResult } from '../../shared'
+import type { Device, LaunchResult, PhoneMode } from '../../shared'
 import { AddApp } from './AddApp'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
 
 /** The live phone: frames from the device; clicks and drags become taps and swipes. */
 export function Phone({
+  mode,
   activeDevice,
   onActiveDevice,
   onLaunched,
 }: {
+  mode: PhoneMode
   activeDevice: Device
   onActiveDevice: (device: Device) => void
   onLaunched: (pid: number | null) => void
@@ -93,6 +95,7 @@ export function Phone({
       </div>
       {adding && (
         <AddApp
+          mode={mode}
           onClose={() => setAdding(false)}
           onInstalled={async (pkg, open) => {
             setApps(await window.api.apps())
@@ -111,21 +114,38 @@ export function Phone({
       <DeviceScreen device={activeDevice} />
       <NavKeys device={activeDevice} />
       <TypeBar device={activeDevice} />
-      <details className="sms">
-        <summary>Send a test SMS to this phone</summary>
-        <input value={smsFrom} onChange={(e) => setSmsFrom(e.target.value)} />
-        <textarea value={smsText} onChange={(e) => setSmsText(e.target.value)} rows={3} />
-        <button
-          onClick={() =>
-            void window.api.sendSms(activeDevice, smsFrom, smsText).then(
-              () => setStatus('SMS sent'),
-              (error: Error) => setStatus(`SMS failed: ${error.message}`),
-            )
-          }
-        >
-          Send
-        </button>
-      </details>
+      {mode === 'usb' && (
+        <div className="cert-hint">
+          <span className="muted">
+            To see HTTPS contents for apps that allow it, install <code>Download/sideglass-ca.crt</code> on the phone as a
+            CA certificate.
+          </span>
+          <button
+            onClick={() =>
+              void window.api.openCertificateSettings().catch((error: Error) => setStatus(`Could not open settings: ${error.message}`))
+            }
+          >
+            Open phone settings
+          </button>
+        </div>
+      )}
+      {mode === 'virtual' && (
+        <details className="sms">
+          <summary>Send a test SMS to this phone</summary>
+          <input value={smsFrom} onChange={(e) => setSmsFrom(e.target.value)} />
+          <textarea value={smsText} onChange={(e) => setSmsText(e.target.value)} rows={3} />
+          <button
+            onClick={() =>
+              void window.api.sendSms(activeDevice, smsFrom, smsText).then(
+                () => setStatus('SMS sent'),
+                (error: Error) => setStatus(`SMS failed: ${error.message}`),
+              )
+            }
+          >
+            Send
+          </button>
+        </details>
+      )}
       <div className="status">{status || 'Drop an APK here to install it.'}</div>
     </section>
   )

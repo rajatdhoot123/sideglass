@@ -10,6 +10,13 @@ left; the phone is on the right, and you click and drag on it to use it.
 
 ## What works (v0.1)
 
+- **Choose your phone** on first run (change it later with ⚙):
+  - **Virtual phone:** Sideglass's own rooted emulator. Full HTTPS capture for every app.
+  - **My phone over USB:** your own phone, no root, only USB debugging. Its traffic goes over the
+    cable to Sideglass; quitting Sideglass puts the phone's proxy setting back. You see every host
+    an app talks to, but HTTPS contents only for apps that trust user certificates (Chrome, or a
+    debug build of your own app). Install `Download/sideglass-ca.crt` on the phone as a CA
+    certificate for those.
 - **One-click setup:** finds the Android SDK, downloads the Google APIs system image if
   needed, creates the virtual phone, boots it with no window, gets root, and installs the
   CA as a system certificate (Android 14+ Conscrypt store included, in every app's mount

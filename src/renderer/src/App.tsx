@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { Device, ExchangeSummary, LogLine, Progress, TlsFailure } from '../../shared'
+import type { Device, ExchangeSummary, LogLine, Progress, Settings, TlsFailure } from '../../shared'
+import { PhoneChoice, SettingsDialog } from './PhoneChoice'
 import { Phone } from './Phone'
 import { Requests } from './Requests'
 import { Logs } from './Logs'
@@ -16,8 +17,26 @@ export function App() {
   const [logs, setLogs] = useState<LogLine[]>([])
   const [tab, setTab] = useState<Tab>('requests')
   const [appPid, setAppPid] = useState<number | null>(null)
+  /** null until loaded; no `phone` yet means first run: ask. */
+  const [settings, setSettings] = useState<Settings | null>(null)
+  const [showSettings, setShowSettings] = useState(false)
   const [activeDevice, setActiveDevice] = useState<Device>('capture')
   const ready = progress.ready?.state === 'done'
+
+  /** Save the phone choice and start a fresh session with it. */
+  const choose = async (next: Settings) => {
+    const saved = await window.api.saveSettings(next)
+    setShowSettings(false)
+    setProgress({})
+    setSetupLog([])
+    setExchanges(new Map())
+    setRefused([])
+    setLogs([])
+    setAppPid(null)
+    setActiveDevice('capture')
+    setSettings(saved)
+    void window.api.start()
+  }
 
   useEffect(() => {
     const offs = [
@@ -33,13 +52,42 @@ export function App() {
       window.api.on('tls-failure', (f) => setRefused((prev) => [...prev.slice(-999), f])),
       window.api.on('logcat', (lines) => setLogs((prev) => [...prev, ...lines].slice(-5000))),
     ]
-    void window.api.start()
+    void window.api.settings().then((s) => {
+      setSettings(s)
+      if (s.phone) void window.api.start()
+    })
     return () => offs.forEach((off) => off())
   }, [])
 
   const list = useMemo(() => [...exchanges.values()], [exchanges])
 
-  if (!ready) return <Setup progress={progress} log={setupLog} onRetry={() => void window.api.start()} />
+  if (!settings) return null
+  if (!settings.phone) {
+    return (
+      <div className="setup">
+        <h1>Sideglass</h1>
+        <p className="muted">Which phone should Sideglass watch? You can change this later in Settings.</p>
+        <PhoneChoice initial={settings} saveLabel="Continue" onSave={(s) => void choose(s)} />
+      </div>
+    )
+  }
+  const dialog = showSettings && (
+    <SettingsDialog initial={settings} onClose={() => setShowSettings(false)} onSave={(s) => void choose(s)} />
+  )
+  if (!ready) {
+    return (
+      <>
+        <Setup
+          mode={settings.phone}
+          progress={progress}
+          log={setupLog}
+          onRetry={() => void window.api.start()}
+          onChangePhone={() => setShowSettings(true)}
+        />
+        {dialog}
+      </>
+    )
+  }
 
   return (
     <div className="app">
@@ -66,12 +114,16 @@ export function App() {
             Clear
           </button>
           <button onClick={() => void window.api.exportHar()}>Export HAR</button>
+          <button title="Settings" onClick={() => setShowSettings(true)}>
+            ⚙
+          </button>
         </nav>
         {tab === 'requests' && <Requests list={list} />}
         {tab === 'logs' && <Logs lines={logs} pid={appPid} />}
         {tab === 'refused' && <Refused list={refused} />}
       </section>
-      <Phone activeDevice={activeDevice} onActiveDevice={setActiveDevice} onLaunched={setAppPid} />
+      <Phone mode={settings.phone} activeDevice={activeDevice} onActiveDevice={setActiveDevice} onLaunched={setAppPid} />
+      {dialog}
     </div>
   )
 }

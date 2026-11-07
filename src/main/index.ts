@@ -4,6 +4,10 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import type { KeyEvent } from '../shared'
 import { toHar } from './har'
 import { Session } from './session'
+import { loadSettings, saveSettings } from './settings'
+import { findSdk } from './sdk'
+import { usbPhones } from './store/usb'
+import type { Settings } from '../shared'
 
 let session: Session | null = null
 let window: BrowserWindow | null = null
@@ -26,6 +30,8 @@ function createWindow(): void {
   else void window.loadFile(join(__dirname, '../renderer/index.html'))
 }
 
+const settingsFile = () => join(app.getPath('userData'), 'settings.json')
+
 function requireSession(): Session {
   if (!session) throw new Error('Session not started')
   return session
@@ -33,29 +39,41 @@ function requireSession(): Session {
 
 ipcMain.handle('session:start', async () => {
   if (session) return
-  session = new Session(join(app.getPath('userData'), 'data'))
-  session.on('progress', (p) => send('progress', p))
-  session.on('setup-log', (l) => send('setup-log', l))
-  session.on('frame', (png: Buffer) => send('frame', 'capture', new Uint8Array(png)))
-  session.on('play-frame', (png: Buffer) => send('frame', 'play', new Uint8Array(png)))
-  session.on('video', (packet) => send('video', 'capture', packet))
-  session.on('play-video', (packet) => send('video', 'play', packet))
-  session.on('screen-mode', (mode) => send('screen-mode', 'capture', mode))
-  session.on('play-screen-mode', (mode) => send('screen-mode', 'play', mode))
-  session.on('store-log', (l) => send('store-log', l))
-  session.on('play-stage', (st) => send('play-stage', st))
-  session.on('logcat', (lines) => send('logcat', lines))
-  session.proxy.on('exchange', (e) => send('exchange', e))
-  session.proxy.on('tls-failure', (f) => send('tls-failure', f))
+  const settings = loadSettings(settingsFile())
+  if (!settings.phone) return
+  const current = new Session(join(app.getPath('userData'), 'data'), settings)
+  session = current
+  current.on('progress', (p) => send('progress', p))
+  current.on('setup-log', (l) => send('setup-log', l))
+  current.on('frame', (png: Buffer) => send('frame', 'capture', new Uint8Array(png)))
+  current.on('play-frame', (png: Buffer) => send('frame', 'play', new Uint8Array(png)))
+  current.on('video', (packet) => send('video', 'capture', packet))
+  current.on('play-video', (packet) => send('video', 'play', packet))
+  current.on('screen-mode', (mode) => send('screen-mode', 'capture', mode))
+  current.on('play-screen-mode', (mode) => send('screen-mode', 'play', mode))
+  current.on('store-log', (l) => send('store-log', l))
+  current.on('play-stage', (st) => send('play-stage', st))
+  current.on('logcat', (lines) => send('logcat', lines))
+  current.proxy.on('exchange', (e) => send('exchange', e))
+  current.proxy.on('tls-failure', (f) => send('tls-failure', f))
   try {
-    await session.start()
+    await current.start()
   } catch (error) {
     send('setup-log', `Setup stopped: ${(error as Error).message}`)
-    const failed = session
-    session = null
-    await failed.stop().catch(() => undefined)
+    // A settings change may already have replaced this session. Don't drop the new one.
+    if (session === current) session = null
+    await current.stop().catch(() => undefined)
   }
 })
+ipcMain.handle('settings:get', () => loadSettings(settingsFile()))
+// Saving stops the current session; the window then starts a new one with the new choice.
+ipcMain.handle('settings:save', async (_, settings: Settings) => {
+  const previous = session
+  session = null
+  await previous?.stop().catch(() => undefined)
+  return saveSettings(settingsFile(), settings)
+})
+ipcMain.handle('cert:open-settings', () => requireSession().openCertificateSettings())
 ipcMain.handle('exchange:get', (_, id: string) => requireSession().proxy.exchanges.get(id) ?? null)
 ipcMain.handle('capture:clear', () => requireSession().proxy.clear())
 type Device = 'capture' | 'play'
@@ -85,7 +103,11 @@ ipcMain.handle('store:search', (_, q: string) => requireSession().searchStore(q)
 ipcMain.handle('store:install', (_, pkg: string) => requireSession().installFromStore(pkg))
 ipcMain.handle('play:install', (_, link: string) => requireSession().installFromPlay(link))
 ipcMain.handle('play:cancel', () => requireSession().cancelPlay())
-ipcMain.handle('usb:phones', () => requireSession().usbPhones())
+// Also used before any session exists (first-run choice, settings), so it only needs the SDK.
+ipcMain.handle('usb:phones', () => {
+  const sdk = findSdk()
+  return sdk ? usbPhones(sdk.adb) : []
+})
 ipcMain.handle('usb:apps', (_, serial: string) => requireSession().usbApps(serial))
 ipcMain.handle('usb:install', (_, serial: string, pkg: string) => requireSession().installFromUsb(serial, pkg))
 ipcMain.handle('apps:list', () => requireSession().packages())

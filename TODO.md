@@ -26,8 +26,9 @@ Use it on apps you build or are allowed to test. Keep it local only, with no clo
 | #6 | First approach for licensed apps: run them on the Play phone, outside the proxy. Replaced by #7. |
 | #7 | The real Play Store is copied onto the capture phone, so a licensed app stays there and its traffic is captured. The capture phone starts with `-writable-system`. |
 | #8 | Test SMS goes to the phone on screen. One shared Play-phone startup. |
+| #11 | First run chooses a virtual phone or the user's own phone over USB. USB mode uses `adb reverse` and the global HTTP proxy, and restores both on quit. No root, so HTTPS bodies only for apps that trust a user CA. |
 
-Next roadmap item is **4.2 Frida certificate unpinning**. 4.3–4.6 are not started.
+Next roadmap item is **4.2 Frida certificate unpinning**. 4.3–4.6 are not started. USB mode still cannot see apps that ignore the system proxy.
 
 ### Layout
 
