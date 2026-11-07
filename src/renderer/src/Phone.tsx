@@ -63,7 +63,16 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
       {adding && (
         <AddApp
           onClose={() => setAdding(false)}
-          onInstalled={() => void window.api.apps().then(setApps)}
+          onInstalled={async (pkg, open) => {
+            setApps(await window.api.apps())
+            if (!pkg || !open) return
+            // Hand back to the capture phone: close the dialog and open the new app.
+            setAdding(false)
+            setStatus(`Starting ${pkg}…`)
+            const pid = await window.api.launch(pkg)
+            onLaunched(pid)
+            setStatus(pid ? `${pkg} running (pid ${pid})` : `${pkg} installed; it did not start by itself`)
+          }}
         />
       )}
       <DeviceScreen device="capture" />
