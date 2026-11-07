@@ -1,6 +1,6 @@
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme } from 'electron'
 import type { KeyEvent } from '../shared'
 import { toHar } from './har'
 import { Session } from './session'
@@ -16,6 +16,8 @@ function send(channel: string, ...args: unknown[]): void {
   if (window && !window.isDestroyed()) window.webContents.send(channel, ...args)
 }
 
+const windowColor = () => (nativeTheme.shouldUseDarkColors ? '#0f1115' : '#f4f5f7')
+
 function createWindow(): void {
   window = new BrowserWindow({
     width: 1500,
@@ -23,7 +25,7 @@ function createWindow(): void {
     minWidth: 1000,
     minHeight: 640,
     title: 'Sideglass',
-    backgroundColor: '#0f1115',
+    backgroundColor: windowColor(),
     webPreferences: { preload: join(__dirname, '../preload/index.js'), sandbox: false, contextIsolation: true },
   })
   if (process.env.ELECTRON_RENDERER_URL) void window.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -123,6 +125,9 @@ ipcMain.handle('har:export', async () => {
 
 app.whenReady().then(() => {
   createWindow()
+  nativeTheme.on('updated', () => {
+    if (window && !window.isDestroyed()) window.setBackgroundColor(windowColor())
+  })
   // Debug aid: SIDEGLASS_SNAPSHOT=/path/file.png saves the window every 3 s (for screenshots in tests and docs).
   const snapshot = process.env.SIDEGLASS_SNAPSHOT
   if (snapshot) {

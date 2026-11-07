@@ -1,16 +1,43 @@
 :root {
-  --bg: #0f1115;
-  --panel: #161a21;
-  --line: #262c36;
-  --text: #d8dee9;
-  --muted: #8a93a3;
-  --accent: #5aa9ff;
-  --bad: #ff6b6b;
+  color-scheme: light;
+  --bg: #f4f5f7;
+  --panel: #ffffff;
+  --line: #e2e6ee;
+  --text: #1c212b;
+  --muted: #5e6878;
+  --accent: #1d6fd0;
+  --bad: #d64545;
   --warn: #f2b84b;
-  --ok: #5fd38d;
+  --warn-text: #8a5a00;
+  --ok: #1f8a4c;
+  --hover: #e2e6ee;
+  --sel: #c5daf6;
+  --on-accent: #ffffff;
+  --banner-bg: #fff6df;
+  --banner-text: #6b5208;
   font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   color: var(--text);
   background: var(--bg);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #0f1115;
+    --panel: #161a21;
+    --line: #262c36;
+    --text: #d8dee9;
+    --muted: #8a93a3;
+    --accent: #5aa9ff;
+    --bad: #ff6b6b;
+    --warn: #f2b84b;
+    --warn-text: #f2b84b;
+    --ok: #5fd38d;
+    --hover: #1b212b;
+    --sel: #1d2b40;
+    --on-accent: #04121f;
+    --banner-bg: #2b2412;
+    --banner-text: #ffe2a3;
+  }
 }
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; min-width: 0; min-height: 0; }
@@ -39,8 +66,8 @@ button:hover { border-color: var(--accent); }
 .row { display: grid; grid-template-columns: 70px 60px 60px 200px 1fr 70px 70px; gap: 8px; padding: 3px 8px; white-space: nowrap; cursor: default; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 .row span { overflow: hidden; text-overflow: ellipsis; }
 .row.head { color: var(--muted); border-bottom: 1px solid var(--line); font-family: inherit; }
-.row:not(.head):hover { background: #1b212b; }
-.row.sel { background: #1d2b40; }
+.row:not(.head):hover { background: var(--hover); }
+.row.sel { background: var(--sel); }
 .row.pending { color: var(--muted); }
 .row.bad span:nth-child(3), .row.aborted span:nth-child(3) { color: var(--bad); }
 .method { color: var(--accent); }
@@ -57,7 +84,7 @@ h4 { margin: 10px 0 4px; color: var(--muted); font-weight: 500; }
 .loglines { overflow: auto; flex: 1; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 .log { display: grid; grid-template-columns: 95px 16px 180px 1fr; gap: 8px; padding: 1px 8px; }
 .log .tag { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.log.W { color: var(--warn); }
+.log.W { color: var(--warn-text); }
 .log.E, .log.F { color: var(--bad); }
 .toolbar { display: flex; gap: 6px; }
 .toolbar select { flex: 1; }
@@ -85,7 +112,7 @@ h4 { margin: 10px 0 4px; color: var(--muted); font-weight: 500; }
   .app { grid-template-columns: minmax(0, 1fr) minmax(260px, 40vw); }
   .row { grid-template-columns: 64px 52px 52px minmax(110px, 170px) minmax(120px, 1fr) 60px 60px; }
 }
-button.primary { background: var(--accent); color: #04121f; border-color: var(--accent); font-weight: 600; }
+button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
 button:disabled { opacity: 0.5; cursor: default; }
 .modal-back { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); display: flex; align-items: center; justify-content: center; z-index: 10; }
 .modal { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; width: 760px; max-width: 95vw; height: 80vh; display: flex; flex-direction: column; }
@@ -107,7 +134,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .usb-list { padding: 8px; }
 .usb-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--line); }
 .banner { border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--line); background: var(--panel); }
-.banner.needs-user { border-color: var(--warn); background: #2b2412; color: #ffe2a3; font-weight: 500; }
+.banner.needs-user { border-color: var(--warn); background: var(--banner-bg); color: var(--banner-text); font-weight: 500; }
 .banner.installing, .banner.copying { border-color: var(--accent); }
 .banner.done { border-color: var(--ok); color: var(--ok); }
 .choice { display: flex; flex-direction: column; gap: 12px; }
