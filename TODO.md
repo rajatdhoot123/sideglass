@@ -217,11 +217,7 @@ The proxy only sees TCP from the emulator, not the app. Options, best first:
 
 ### 4.6 Product polish (after the roadmap)
 
-- [ ] Packaging: `electron-builder`, signed builds for macOS (notarised), Windows and Linux;
-      auto-update.
-- [ ] First-run SDK install when no Android SDK is found: download Google's cmdline-tools to
-      `~/.sideglass/android-sdk` and accept licenses with user consent (Google's SDK can't be
-      bundled).
+- [ ] Packaging and releases: see 4.7.
 - [ ] Persist sessions in SQLite (`better-sqlite3`): search across sessions; open old HARs.
 - [ ] Request tools: copy as cURL, replay, edit-and-replay, block or mock a URL (mockttp rules
       make this easy).
@@ -231,6 +227,49 @@ The proxy only sees TCP from the emulator, not the app. Options, best first:
 - [ ] Tests: unit tests for `subjectHashOld`, `packageFromPlayLink`, HAR export and log
       parsing; CI running typecheck and build.
 - [ ] README screenshots and GIF (use `SIDEGLASS_SNAPSHOT`).
+
+### 4.7 Downloadable release
+
+Goal: people download Sideglass from GitHub Releases and double-click it, without cloning the
+repo or running `npm run dev`. Paths are already packaging-safe: data goes to
+`app.getPath('userData')` and `scrcpy-server` is downloaded on first use, so only `out/` ships.
+
+Fix before the first public build:
+
+- [ ] **Android SDK missing.** Many users won't have it, and Google's SDK can't be bundled.
+      Add a first-run install: download Google's cmdline-tools to `~/.sideglass/android-sdk`
+      (already in `candidateRoots()`) and accept the licenses with the user's consent. Until
+      then, the README says "install Android Studio first".
+- [ ] **No Java when launched from Finder/Dock.** `sdkmanager` and `avdmanager` need Java. A GUI
+      launch doesn't load the shell profile, so `JAVA_HOME` is usually unset and first-run
+      setup can fail. When `JAVA_HOME` is unset, use Android Studio's bundled JBR
+      (`/Applications/Android Studio.app/Contents/jbr/Contents/Home` on macOS; `jbr/` under
+      the Android Studio install on Windows/Linux) and pass it in the env from `emulator.ts`.
+      `ANDROID_HOME` has the same GUI-launch problem, but `sdk.ts` already falls back to
+      the usual SDK paths.
+- [ ] **Windows is untested.** `sdk.ts` handles `.exe`/`.bat`, but nothing has run there. Ship
+      macOS and Linux first and label Windows experimental until someone runs a smoke test.
+
+Build and release:
+
+- [ ] Add `electron-builder` + `electron-builder.yml`: macOS `.dmg` (arm64 + x64), Windows
+      NSIS `.exe`, Linux `AppImage` + `.deb`.
+- [ ] Build an unsigned macOS `.dmg` locally and check the packaged app finds the SDK and Java
+      when opened from Finder.
+- [ ] GitHub Actions workflow: on a `v*` tag, build on macOS, Windows and Linux runners and
+      upload the files to a GitHub Release.
+- [ ] Until signing is set up: the README tells macOS users to run
+      `xattr -cr /Applications/Sideglass.app`, and Windows users to click past SmartScreen.
+
+Signing (when the Apple Developer account exists):
+
+- [ ] macOS: Apple Developer Program, US$99/yr (₹8,700/yr in India). Developer ID
+      Application certificate + notarisation in CI (`CSC_LINK`, `CSC_KEY_PASSWORD`,
+      `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` as repo secrets). Hardened
+      runtime entitlements must allow what Electron needs (JIT, unsigned executable memory).
+      Builds that were already notarised keep working if the membership lapses.
+- [ ] Windows: optional code-signing certificate to remove the SmartScreen warning.
+- [ ] Auto-update with `electron-updater` reading GitHub Releases (needs signed macOS builds).
 
 ## 5. Rules for this project
 
