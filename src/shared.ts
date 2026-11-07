@@ -36,6 +36,7 @@ export interface Api {
   on(channel: 'tls-failure', cb: (f: TlsFailure) => void): () => void
   on(channel: 'frame', cb: (device: Device, png: Uint8Array) => void): () => void
   on(channel: 'store-log', cb: (line: string) => void): () => void
+  on(channel: 'play-stage', cb: (stage: { stage: 'needs-user' | 'installing' | 'copying' | 'done'; message: string }) => void): () => void
   on(channel: 'logcat', cb: (lines: LogLine[]) => void): () => void
 }
 

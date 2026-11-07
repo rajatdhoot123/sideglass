@@ -23,6 +23,8 @@ export function packageFromPlayLink(input: string): string | null {
  * own Google account and taps Install; Sideglass then copies the installed app's APK files.
  * Nothing is downloaded from outside Google Play.
  */
+export type PlayStage = 'needs-user' | 'installing' | 'copying' | 'done'
+
 export class PlayHelper extends EventEmitter {
   emulator: RunningEmulator | null = null
   screen: Screen | null = null
@@ -51,16 +53,74 @@ export class PlayHelper extends EventEmitter {
     return false
   }
 
-  /** Wait for the user to install it from Play, then copy its APK files to [dir]. */
-  async waitAndPull(pkg: string, dir: string, timeoutMs = 15 * 60_000, isCancelled = () => false): Promise<string[]> {
+  /** Is a Google account signed in on the Play phone? */
+  async signedIn(): Promise<boolean> {
+    const adb = await this.start()
+    const out = await adb.shell('dumpsys account').catch(() => '')
+    return /Account \{name=[^,]+, type=com\.google\}/.test(out)
+  }
+
+  /**
+   * Tap the Play page's "Install" (or "Update") button if it is on screen. Returns true if it
+   * tapped. Reads the screen with uiautomator; never taps "Buy" or price buttons.
+   */
+  async tapInstall(): Promise<boolean> {
+    const adb = await this.start()
+    const xml = await adb.shell('uiautomator dump /sdcard/sideglass-ui.xml >/dev/null && cat /sdcard/sideglass-ui.xml').catch(() => '')
+    const node = [...xml.matchAll(/<node [^>]*>/g)]
+      .map((m) => m[0])
+      .find((n) => /(text|content-desc)="(Install|Update)"/.test(n) && /enabled="true"/.test(n))
+    const bounds = node && /bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/.exec(node)
+    if (!bounds) return false
+    const [x1, y1, x2, y2] = bounds.slice(1).map(Number)
+    await adb.shell(`input tap ${Math.round((x1 + x2) / 2)} ${Math.round((y1 + y2) / 2)}`)
+    return true
+  }
+
+  /**
+   * Hand-over loop. Sideglass drives the Play phone itself and only stops for things the user
+   * must do (sign in, accept something, pay). Each change of stage is emitted as 'stage' so the
+   * window can show what is needed; once the user is done, the loop picks up again by itself.
+   * Ends by copying the installed app's APK files to [dir].
+   */
+  async waitAndPull(pkg: string, dir: string, timeoutMs = 20 * 60_000, isCancelled = () => false): Promise<string[]> {
     const adb = await this.start()
     const deadline = Date.now() + timeoutMs
+    let stage = ''
+    let lastTap = 0
+    let reopened = false
+    const set = (next: PlayStage, message: string) => {
+      if (next === stage) return
+      stage = next
+      this.emit('stage', { stage: next, message })
+    }
     while (Date.now() < deadline && !isCancelled()) {
       const paths = await apkPaths(adb, pkg)
-      // Play writes the base first and splits right after; wait until the set stops changing.
       if (paths.length) {
+        // Play writes the base first and splits right after; wait until the set stops changing.
         await new Promise((r) => setTimeout(r, 3000))
-        if ((await apkPaths(adb, pkg)).length === paths.length) return pullApp(adb, pkg, dir)
+        if ((await apkPaths(adb, pkg)).length === paths.length) {
+          set('copying', 'Installed on the Play phone. Copying it to the capture phone…')
+          return pullApp(adb, pkg, dir)
+        }
+        continue
+      }
+      if (!(await this.signedIn())) {
+        set('needs-user', 'Sign in with a Google account on the phone below. Sideglass continues by itself once you are signed in.')
+        reopened = false
+      } else {
+        if (!reopened) {
+          // Back on the app's page after sign-in.
+          await adb.shell(`am start -a android.intent.action.VIEW -d 'market://details?id=${pkg}' com.android.vending`)
+          reopened = true
+          await new Promise((r) => setTimeout(r, 2500))
+        }
+        if (Date.now() - lastTap > 8000 && (await this.tapInstall())) {
+          lastTap = Date.now()
+          set('installing', 'Tapped Install. Play is downloading the app…')
+        } else if (Date.now() - lastTap > 30_000) {
+          set('needs-user', 'Play needs you on the phone below (for example accept a prompt, or the app is paid or not offered here). Sideglass continues once it is installed.')
+        }
       }
       await new Promise((r) => setTimeout(r, 2000))
     }
