@@ -8,14 +8,20 @@ export function DeviceScreen({ device, className }: { device: Device; className?
   const img = useRef<HTMLImageElement>(null)
 
   useEffect(() => {
+    // Drop the previous phone's picture immediately. Taps already go to [device].
+    setSrc(null)
     let last: string | null = null
-    return window.api.on('frame', (from, png) => {
+    const off = window.api.on('frame', (from, png) => {
       if (from !== device) return
       const url = URL.createObjectURL(new Blob([png.slice()], { type: 'image/png' }))
       setSrc(url)
       if (last) URL.revokeObjectURL(last)
       last = url
     })
+    return () => {
+      off()
+      if (last) URL.revokeObjectURL(last)
+    }
   }, [device])
 
   const point = (e: React.MouseEvent) => {

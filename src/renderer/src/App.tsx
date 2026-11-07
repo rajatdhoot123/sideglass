@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { ExchangeSummary, LogLine, Progress, TlsFailure } from '../../shared'
+import type { Device, ExchangeSummary, LogLine, Progress, TlsFailure } from '../../shared'
 import { Phone } from './Phone'
 import { Requests } from './Requests'
 import { Logs } from './Logs'
@@ -16,6 +16,7 @@ export function App() {
   const [logs, setLogs] = useState<LogLine[]>([])
   const [tab, setTab] = useState<Tab>('requests')
   const [appPid, setAppPid] = useState<number | null>(null)
+  const [activeDevice, setActiveDevice] = useState<Device>('capture')
   const ready = progress.ready?.state === 'done'
 
   useEffect(() => {
@@ -70,7 +71,7 @@ export function App() {
         {tab === 'logs' && <Logs lines={logs} pid={appPid} />}
         {tab === 'refused' && <Refused list={refused} />}
       </section>
-      <Phone onLaunched={setAppPid} />
+      <Phone activeDevice={activeDevice} onActiveDevice={setActiveDevice} onLaunched={setAppPid} />
     </div>
   )
 }

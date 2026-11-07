@@ -128,8 +128,36 @@ export class PlayHelper extends EventEmitter {
   async open(pkg: string): Promise<boolean> {
     const adb = await this.start()
     if ((await apkPaths(adb, pkg)).length) return true
-    await adb.shell(`am start -a android.intent.action.VIEW -d 'market://details?id=${pkg}' com.android.vending`)
+    await this.openStoreListing(pkg)
     return false
+  }
+
+  async openStoreListing(pkg: string): Promise<void> {
+    const adb = await this.start()
+    await adb.shell(`am start -a android.intent.action.VIEW -d 'market://details?id=${pkg}' com.android.vending`)
+  }
+
+  async isInstalled(pkg: string): Promise<boolean> {
+    if (!this.emulator) return false
+    return (await apkPaths(this.emulator.adb, pkg)).length > 0
+  }
+
+  async isInstalledFromPlay(pkg: string): Promise<boolean> {
+    if (!this.emulator) return false
+    const out = await this.emulator.adb.shell(`dumpsys package ${pkg}`)
+    return /(?:installerPackageName|initiatingPackageName|originatingPackageName)=com\.android\.vending\b/.test(out)
+  }
+
+  async launch(pkg: string): Promise<number | null> {
+    const adb = await this.start()
+    const resolved = await adb.shell(`cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER ${pkg}`)
+    const component = resolved.trim().split('\n').pop()?.trim() ?? ''
+    if (!component.startsWith(`${pkg}/`)) throw new Error(`No launcher activity found for ${pkg} on the Play phone`)
+    await adb.shell(`am force-stop ${pkg}`)
+    await adb.shell(`am start -n '${component}'`)
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    const out = (await adb.shell(`pidof ${pkg}`).catch(() => '')).trim()
+    return out ? Number(out.split(/\s+/)[0]) : null
   }
 
   /** Is a Google account signed in on the Play phone? */
@@ -190,7 +218,7 @@ export class PlayHelper extends EventEmitter {
       } else {
         if (!reopened) {
           // Back on the app's page after sign-in.
-          await adb.shell(`am start -a android.intent.action.VIEW -d 'market://details?id=${pkg}' com.android.vending`)
+          await this.openStoreListing(pkg)
           reopened = true
           await new Promise((r) => setTimeout(r, 2500))
         }

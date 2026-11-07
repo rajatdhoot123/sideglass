@@ -6,6 +6,11 @@ import type { UsbPhone } from './main/store/usb'
 
 export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone }
 export type Device = 'capture' | 'play'
+export interface LaunchResult {
+  device: Device
+  pid: number | null
+  message?: string
+}
 
 /** What the window can ask the main process to do. */
 export interface Api {
@@ -27,7 +32,7 @@ export interface Api {
   installFromUsb(serial: string, pkg: string): Promise<string>
   pathForFile(file: File): string
   apps(): Promise<string[]>
-  launch(pkg: string): Promise<number | null>
+  launch(pkg: string): Promise<LaunchResult>
   sendSms(from: string, text: string): Promise<void>
   exportHar(): Promise<string | null>
   on(channel: 'progress', cb: (p: Progress) => void): () => void
