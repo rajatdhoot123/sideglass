@@ -2,11 +2,12 @@ import { EventEmitter } from 'node:events'
 import type { Adb } from './adb'
 
 /**
- * v0.1 screen: repeated `screencap` frames and `input` taps. Works on any device with no
- * extra binary; a scrcpy video stream replaces it later.
+ * Screenshot fallback: repeated `screencap` frames and `input` taps. Works on any device
+ * with no extra binary. `Mirror` uses it when the scrcpy stream cannot start.
  */
 export class Screen extends EventEmitter {
   private running = false
+  private ticket = 0
   size = { width: 1080, height: 2400 }
 
   constructor(private readonly adb: Adb) {
@@ -14,24 +15,27 @@ export class Screen extends EventEmitter {
   }
 
   async start(): Promise<void> {
-    this.size = await this.adb.screenSize()
+    const ticket = ++this.ticket
+    this.size = await this.adb.screenSize().catch(() => this.size)
+    if (ticket !== this.ticket) return
     this.running = true
-    void this.loop()
+    void this.loop(ticket)
   }
 
   stop(): void {
     this.running = false
+    this.ticket++
   }
 
-  private async loop(): Promise<void> {
-    while (this.running) {
+  private async loop(ticket: number): Promise<void> {
+    while (this.running && ticket === this.ticket) {
       const started = Date.now()
       try {
         const png = await this.adb.execBuffer(['exec-out', 'screencap', '-p'])
         if (png.length > 0) this.emit('frame', png)
       } catch (error) {
         // A frame can fail while the device reboots or shuts down; report it, never throw.
-        if (this.running) this.emit('frame-error', error)
+        if (this.running && ticket === this.ticket) this.emit('frame-error', error)
         await new Promise((r) => setTimeout(r, 1000))
       }
       const wait = Math.max(0, 200 - (Date.now() - started))

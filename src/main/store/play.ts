@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import type { Adb } from '../adb'
 import { ensureAvd, PLAY_PHONE, startEmulator, stopEmulator, type RunningEmulator } from '../emulator'
-import { Screen } from '../screen'
+import { Mirror } from '../mirror'
 import type { Sdk } from '../sdk'
 import { apkPaths, isPackageName, pullApp } from './apk'
 
@@ -27,9 +27,12 @@ export type PlayStage = 'needs-user' | 'installing' | 'copying' | 'done'
 
 export class PlayHelper extends EventEmitter {
   emulator: RunningEmulator | null = null
-  screen: Screen | null = null
+  screen: Mirror | null = null
 
-  constructor(private readonly sdk: Sdk) {
+  constructor(
+    private readonly sdk: Sdk,
+    private readonly cacheDir: string,
+  ) {
     super()
   }
 
@@ -39,8 +42,11 @@ export class PlayHelper extends EventEmitter {
     if (this.emulator) return this.emulator.adb
     await ensureAvd(this.sdk, PLAY_PHONE, this.log)
     this.emulator = await startEmulator(this.sdk, PLAY_PHONE, this.log)
-    this.screen = new Screen(this.emulator.adb)
+    this.screen = new Mirror(this.emulator.adb, this.cacheDir, 2)
     this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
+    this.screen.on('video', (packet) => this.emit('video', packet))
+    this.screen.on('mode', (mode) => this.emit('screen-mode', mode))
+    this.screen.on('log', (line: string) => this.log(line))
     await this.screen.start()
     return this.emulator.adb
   }

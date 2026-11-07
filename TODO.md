@@ -18,7 +18,7 @@ Use it on apps you build or are allowed to test. Keep it local only, with no clo
 |---|---|---|
 | `main` | pushed | v0.1: setup, proxy, system CA, live phone (screencap frames), Requests / Logs / Refused TLS tabs, APK drop, launch app, logcat, test SMS, HAR export. Renamed Sideglass. |
 | `feat/add-apps` | **PR #1 merged into main (2026-11-07)** | **+ Add app** window: F-Droid store, Play Store link (second Play phone), USB phone, APK file. Tested headless (`scripts/apps.mts`). |
-| `feat/scrcpy-stream` | draft PR #2 (base `main`) | Only the Tango packages are installed (see 4.1). No code yet. |
+| `feat/scrcpy-stream` | draft PR #2 (base `main`) | H.264 scrcpy stream, real touch and keyboard, screenshot fallback. See 4.1. |
 
 PR #1 is merged; continue on `feat/scrcpy-stream`.
 
@@ -36,7 +36,9 @@ src/main/            Electron main process (Node)
   certificate.ts     CA create/load; installSystemCa: tmpfs over /system/etc/security/cacerts and
                      bind mount over /apex/com.android.conscrypt/cacerts in EVERY mount namespace
   proxy.ts           mockttp proxy: Exchange records, bodies (2 MB cap), TLS refusals, 5000-row cap
-  screen.ts          v0.1 screen: `screencap -p` loop (~5 fps) + `input tap/swipe/keyevent/text`
+  screen.ts          screenshot fallback: `screencap -p` loop + `input tap/swipe/keyevent/text`
+  mirror.ts          scrcpy H.264 stream (Tango) with touch, scroll, and keyboard; falls back to screen.ts
+  keys.ts            DOM key codes to Android key codes
   logcat.ts          `logcat -v threadtime -T 1`, parsed, batched every 250 ms
   har.ts             HAR 1.2 export
   store/apk.ts       pm path / pull / install(-multiple); replaces differently signed user copies
@@ -120,29 +122,32 @@ Already installed (MIT, all at least 2 weeks old):
 `@yume-chan/stream-extra@2.6.1`. Docs: https://tangoadb.dev/scrcpy/
 
 Plan:
-- [ ] **Main process:** connect to the running adb server with `AdbServerClient` +
+- [x] **Main process:** connect to the running adb server with `AdbServerClient` +
       `AdbServerNodeTcpConnector({ host: '127.0.0.1', port: 5037 })`, then pick the device by
       serial (`emulator-5590`, or `emulator-5592` for the Play phone).
-- [ ] **Server binary:** download `scrcpy-server-v<version>` from
+- [x] **Server binary:** download `scrcpy-server-v<version>` from
       https://github.com/Genymobile/scrcpy/releases (Apache-2.0) on first use. The version
       must match the options class you use from `@yume-chan/scrcpy` (e.g. `ScrcpyOptions3_x` ↔
       server 3.x; check which classes 2.3.0 exports). Store it in userData, then
-      `AdbScrcpyClient.pushServer`.
-- [ ] **Start:** `AdbScrcpyClient.start(adb, '/data/local/tmp/scrcpy-server.jar', options)` with
+      `AdbScrcpyClient.pushServer`. Server 3.3.3 with `AdbScrcpyOptions3_3_3`.
+- [x] **Start:** `AdbScrcpyClient.start(adb, '/data/local/tmp/scrcpy-server.jar', options)` with
       `video: true, audio: false, control: true, maxSize: 1280` (or similar),
       `videoCodec: 'h264'`.
-- [ ] **Video:** read `client.videoStream` packets (`configuration` and `data`) and send them to
+- [x] **Video:** read `client.videoStream` packets (`configuration` and `data`) and send them to
       the renderer over IPC as plain objects (Uint8Array + pts + keyframe).
-- [ ] **Renderer:** build a `ReadableStream` of those packets, decode with
+- [x] **Renderer:** build a `ReadableStream` of those packets, decode with
       `WebCodecsVideoDecoder` from `@yume-chan/scrcpy-decoder-webcodecs`, and draw to a canvas.
-      Replace the `<img>` in `DeviceScreen.tsx`.
-- [ ] **Input:** use `client.controller`: `injectTouch` (down/move/up from pointer events, so
+      The `<img>` in `DeviceScreen.tsx` stays only for the screenshot fallback.
+- [x] **Input:** use `client.controller`: `injectTouch` (down/move/up from pointer events, so
       drags are real and long-press works), `injectScroll` (wheel), `injectKeyCode`
       (keydown/keyup when the canvas has focus), `injectText`, `backOrScreenOn`.
-- [ ] **Fallback:** keep `screen.ts` (screencap) and use it if scrcpy fails to start.
-- [ ] Do the same for the Play phone in the Add-app dialog.
+- [x] **Fallback:** keep `screen.ts` (screencap) and use it if scrcpy fails to start.
+- [x] Do the same for the Play phone in the Add-app dialog.
 - [ ] **Done when:** scrolling a list in Chrome is smooth, typing on the Mac keyboard types on
-      the phone, and `npm run smoke` still passes.
+      the phone, and `npm run smoke` still passes. Checked on the already-running capture phone:
+      server 3.3.3, 576×1280 H.264, packets kept flowing (~21 fps while that emulator was busy),
+      and tap, scroll, and Home were injected. `npm run smoke` was not re-run: it would `adb root`
+      the live `emulator-5590`. The phone picture in the window was not clicked through.
 
 ### 4.2 Frida certificate unpinning
 
