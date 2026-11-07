@@ -28,8 +28,9 @@ export async function pullApp(adb: Adb, pkg: string, dir: string): Promise<strin
 }
 
 /** Install one APK or a set of splits. Returns adb's last line ("Success" or the failure). */
-export async function installApks(adb: Adb, paths: string[]): Promise<string> {
-  const args = paths.length > 1 ? ['install-multiple', '-r', '-g', ...paths] : ['install', '-r', '-g', paths[0]]
+export async function installApks(adb: Adb, paths: string[], installer?: string): Promise<string> {
+  const flags = ['-r', '-g', ...(installer ? ['-i', installer] : [])]
+  const args = paths.length > 1 ? ['install-multiple', ...flags, ...paths] : ['install', ...flags, paths[0]]
   try {
     const out = await adb.exec(args, 300_000)
     return out.trim().split('\n').pop() ?? ''

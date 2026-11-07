@@ -99,7 +99,8 @@ export async function startEmulator(sdk: Sdk, spec: PhoneSpec, log: Log, proxyPo
   log(`Starting ${spec.avd} on ${serial}...`)
   const args = ['-avd', spec.avd, '-port', String(spec.port), '-no-window', '-no-boot-anim', '-no-audio', '-gpu', 'auto']
   // The capture phone always cold-boots into a clean state; the Play phone keeps its sign-in.
-  if (proxyPort) args.push('-no-snapshot-save', '-http-proxy', `http://127.0.0.1:${proxyPort}`)
+  // -writable-system keeps the Play Store that replaces the LicenseChecker stub (see playstore.ts).
+  if (proxyPort) args.push('-no-snapshot-save', '-writable-system', '-http-proxy', `http://127.0.0.1:${proxyPort}`)
   const child = spawn(sdk.emulator, args, { env: sdkEnv(sdk), detached: false })
   child.stdout?.on('data', (d: Buffer) => {
     const line = d.toString().trim()

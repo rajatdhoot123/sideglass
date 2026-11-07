@@ -71,12 +71,7 @@ ipcMain.handle('usb:phones', () => requireSession().usbPhones())
 ipcMain.handle('usb:apps', (_, serial: string) => requireSession().usbApps(serial))
 ipcMain.handle('usb:install', (_, serial: string, pkg: string) => requireSession().installFromUsb(serial, pkg))
 ipcMain.handle('apps:list', () => requireSession().packages())
-ipcMain.handle('app:launch', async (_, pkg: string) => {
-  const s = requireSession()
-  await s.launch(pkg)
-  await new Promise((r) => setTimeout(r, 1500))
-  return s.pidOf(pkg)
-})
+ipcMain.handle('app:launch', (_, pkg: string) => requireSession().launch(pkg))
 ipcMain.handle('sms:send', (_, from: string, text: string) => requireSession().sendSms(from, text))
 ipcMain.handle('har:export', async () => {
   const s = requireSession()

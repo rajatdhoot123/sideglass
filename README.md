@@ -28,6 +28,10 @@ left; the phone is on the right, and you click and drag on it to use it.
   - **From my phone:** pick an app on a USB-connected phone (USB debugging on) to copy it over.
   - **APK file:** drop APKs on the phone (split APKs together).
 - **Launch** an installed app from the list.
+- **Apps that check their Google Play licence** (PairIP, LVL): the first launch puts the real
+  Play Store on the capture phone (copied from the Play phone, kept in its writable system), so
+  the app runs where its traffic is captured. Sign in to Google Play there once with the account
+  that has the app.
 - **Logs:** logcat, filtered to the launched app.
 - **Test SMS:** send an SMS from any sender to the phone.
 - **Export HAR** for Chrome DevTools, Charles, Insomnia and the like.

@@ -11,6 +11,19 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
   const [smsText, setSmsText] = useState('Rs.500.00 debited from A/c XX1234 on 07-11-26 to ZOMATO. UPI Ref 512345678901')
   const [dragging, setDragging] = useState(false)
   useEffect(() => void window.api.apps().then(setApps), [])
+  // Long steps (such as putting Google Play on the phone for a licensed app) report progress here.
+  useEffect(() => window.api.on('store-log', (line) => setStatus(line)), [])
+
+  const launch = async (pkg: string, notStarted: string) => {
+    setStatus(`Starting ${pkg}…`)
+    try {
+      const { pid, message } = await window.api.launch(pkg)
+      onLaunched(pid)
+      setStatus(message ?? (pid ? `${pkg} running (pid ${pid})` : notStarted))
+    } catch (error) {
+      setStatus(`Could not start ${pkg}: ${(error as Error).message}`)
+    }
+  }
 
   const install = async (files: FileList) => {
     const paths = [...files].map((f) => window.api.pathForFile(f)).filter((p) => p.endsWith('.apk'))
@@ -44,10 +57,7 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
           defaultValue=""
           onChange={async (e) => {
             if (!e.target.value) return
-            setStatus(`Starting ${e.target.value}…`)
-            const pid = await window.api.launch(e.target.value)
-            onLaunched(pid)
-            setStatus(pid ? `${e.target.value} running (pid ${pid})` : `${e.target.value} did not start`)
+            await launch(e.target.value, `${e.target.value} did not start`)
           }}
         >
           <option value="">Launch app…</option>
@@ -68,10 +78,7 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
             if (!pkg || !open) return
             // Hand back to the capture phone: close the dialog and open the new app.
             setAdding(false)
-            setStatus(`Starting ${pkg}…`)
-            const pid = await window.api.launch(pkg)
-            onLaunched(pid)
-            setStatus(pid ? `${pkg} running (pid ${pid})` : `${pkg} installed; it did not start by itself`)
+            await launch(pkg, `${pkg} installed; it did not start by itself`)
           }}
         />
       )}

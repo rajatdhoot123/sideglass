@@ -3,7 +3,8 @@ import { generateSPKIFingerprint } from 'mockttp'
 import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
 import { CAPTURE_PHONE, ensureAvd, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
-import { installApks, pullApp } from './store/apk'
+import { installApks, isPackageName, pullApp } from './store/apk'
+import { hasPlayStore, installPlayStore, needsPlayLicense, pullPlayStore } from './playstore'
 import { FEATURED, installFromFdroid, search as searchFdroid } from './store/fdroid'
 import { packageFromPlayLink, PlayHelper } from './store/play'
 import { usbPhones, userApps } from './store/usb'
@@ -12,6 +13,7 @@ import { Logcat } from './logcat'
 import { CaptureProxy } from './proxy'
 import { Screen } from './screen'
 import { findSdk, type Sdk } from './sdk'
+import type { LaunchResult } from '../shared'
 
 export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'root' | 'trust' | 'ready'
 export interface Progress {
@@ -69,19 +71,9 @@ export class Session extends EventEmitter {
     this.emulator = emu
     await this.step('root', 'Getting root on the virtual phone', () => emu.adb.root())
     await this.step('trust', 'Installing certificate as a system CA', async () => {
-      await installSystemCa(emu.adb, ca)
+      await this.trust(emu.adb, ca)
       this.log(`Android API ${await sdkVersion(emu.adb)}: CA ${ca.androidName} trusted`)
     })
-    // Chrome uses its own root list, not the system store: tell it to accept our CA's key,
-    // and skip its welcome and sign-in screens, which get in the way of a test phone.
-    const spki = await generateSPKIFingerprint(ca.cert)
-    const flags = `chrome --disable-fre --no-default-browser-check --no-first-run --ignore-certificate-errors-spki-list=${spki}`
-    await emu.adb
-      .shell(
-        `echo '${flags}' > /data/local/tmp/chrome-command-line && chmod 644 /data/local/tmp/chrome-command-line` +
-          ' && am set-debug-app --persistent com.android.chrome && am force-stop com.android.chrome',
-      )
-      .catch(() => undefined)
     this.screen = new Screen(emu.adb)
     this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
     await this.screen.start()
@@ -89,6 +81,60 @@ export class Session extends EventEmitter {
     this.logcat.on('lines', (lines) => this.emit('logcat', lines))
     this.logcat.start()
     this.progress('ready', 'done', 'Ready')
+  }
+
+  /** Trust our CA in the system store and in Chrome. Needed after every boot (the CA mount is tmpfs). */
+  private async trust(adb: Adb, ca: CaFiles): Promise<void> {
+    await installSystemCa(adb, ca)
+    // Chrome uses its own root list, not the system store: tell it to accept our CA's key,
+    // and skip its welcome and sign-in screens, which get in the way of a test phone.
+    const spki = await generateSPKIFingerprint(ca.cert)
+    const flags = `chrome --disable-fre --no-default-browser-check --no-first-run --ignore-certificate-errors-spki-list=${spki}`
+    await adb
+      .shell(
+        `echo '${flags}' > /data/local/tmp/chrome-command-line && chmod 644 /data/local/tmp/chrome-command-line` +
+          ' && am set-debug-app --persistent com.android.chrome && am force-stop com.android.chrome',
+      )
+      .catch(() => undefined)
+  }
+
+  private playStoreSetup: Promise<void> | null = null
+
+  /**
+   * Give the capture phone the real Play Store so apps that check their Google Play licence
+   * (PairIP and LVL) can run there, with their traffic captured. Takes a few minutes once.
+   */
+  private ensurePlayStore(): Promise<void> {
+    this.playStoreSetup ??= this.setUpPlayStore().finally(() => {
+      this.playStoreSetup = null
+    })
+    return this.playStoreSetup
+  }
+
+  private async setUpPlayStore(): Promise<void> {
+    const adb = this.requireAdb()
+    if (await hasPlayStore(adb)) return
+    const say = (line: string) => this.emit('store-log', line)
+    say('This app checks its Google Play licence. Copying Google Play from the Play phone (first time only)…')
+    const files = await pullPlayStore(await this.playHelper().start(), join(this.dataDir, 'playstore'))
+    this.logcat?.stop()
+    await installPlayStore(adb, files, say)
+    await adb.root()
+    await this.trust(adb, this.ca!)
+    this.logcat = new Logcat(adb)
+    this.logcat.on('lines', (lines) => this.emit('logcat', lines))
+    this.logcat.start()
+    say('Google Play is on the capture phone.')
+  }
+
+  private playHelper(): PlayHelper {
+    if (!this.play) {
+      this.play = new PlayHelper(this.sdk!)
+      this.play.on('log', (l) => this.emit('store-log', l))
+      this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
+      this.play.on('stage', (st) => this.emit('play-stage', st))
+    }
+    return this.play
   }
 
   play: PlayHelper | null = null
@@ -132,19 +178,15 @@ export class Session extends EventEmitter {
   }
 
   private async runPlay(pkg: string): Promise<string> {
-    if (!this.play) {
-      this.play = new PlayHelper(this.sdk!)
-      this.play.on('log', (l) => this.emit('store-log', l))
-      this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
-      this.play.on('stage', (st) => this.emit('play-stage', st))
-    }
+    const play = this.playHelper()
     this.playCancelled = false
     this.emit('store-log', 'Starting the Play Store phone (first time: sign in with your Google account)…')
-    const installed = await this.play.open(pkg)
+    const installed = await play.open(pkg)
     this.emit('store-log', installed ? `${pkg} is already on the Play phone` : `Tap Install on the Play phone for ${pkg}`)
-    const apks = await this.play.waitAndPull(pkg, join(this.downloads, 'play'), undefined, () => this.playCancelled)
+    const apks = await play.waitAndPull(pkg, join(this.downloads, 'play'), undefined, () => this.playCancelled)
     this.emit('store-log', `Copying ${apks.length} APK file(s) to the capture phone…`)
-    const result = await installApks(this.requireAdb(), apks)
+    // Record Google Play as the installer, as on a real phone; licence checks look at it.
+    const result = await installApks(this.requireAdb(), apks, 'com.android.vending')
     this.emit('store-log', `${pkg}: ${result}`)
     this.emit('play-stage', { stage: 'done', message: `${pkg} is on the capture phone.` })
     return pkg
@@ -180,10 +222,25 @@ export class Session extends EventEmitter {
   }
 
   /** Restart an app so it starts in a process that sees our CA. */
-  async launch(pkg: string): Promise<void> {
+  async launch(pkg: string): Promise<LaunchResult> {
+    if (!isPackageName(pkg)) throw new Error(`Invalid package name: ${pkg}`)
     const adb = this.requireAdb()
+    let message: string | undefined
+    if (needsPlayLicense(await adb.shell(`dumpsys package ${pkg}`).catch(() => ''))) {
+      await this.ensurePlayStore()
+      const account = /Account \{name=[^,]+, type=com\.google\}/.test(await adb.shell('dumpsys account').catch(() => ''))
+      if (!account) {
+        message = `${pkg} checks its Google Play licence: sign in to Google Play on this phone with the account that has the app.`
+      }
+    }
+    // Start the launcher activity directly: `monkey` aborts if any other process crashes meanwhile.
+    const resolved = await adb.shell(`cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER ${pkg}`)
+    const component = resolved.trim().split('\n').pop()?.trim() ?? ''
+    if (!component.startsWith(`${pkg}/`)) throw new Error(`${pkg} has no launcher activity`)
     await adb.shell(`am force-stop ${pkg}`)
-    await adb.shell(`monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`)
+    await adb.shell(`am start -n '${component}'`)
+    await new Promise((r) => setTimeout(r, 1500))
+    return { pid: await this.pidOf(pkg), message }
   }
 
   async pidOf(pkg: string): Promise<number | null> {
