@@ -17,10 +17,10 @@ Use it on apps you build or are allowed to test. Keep it local only, with no clo
 | Branch | State | Contents |
 |---|---|---|
 | `main` | pushed | v0.1: setup, proxy, system CA, live phone (screencap frames), Requests / Logs / Refused TLS tabs, APK drop, launch app, logcat, test SMS, HAR export. Renamed Sideglass. |
-| `feat/add-apps` | **PR #1 open, not merged** | **+ Add app** window: F-Droid store, Play Store link (second Play phone), USB phone, APK file. Tested headless (`scripts/apps.mts`). |
-| `feat/scrcpy-stream` | started, branched from `feat/add-apps` | Only the Tango packages are installed (see 4.1). No code yet. |
+| `feat/add-apps` | **PR #1 merged into main (2026-11-07)** | **+ Add app** window: F-Droid store, Play Store link (second Play phone), USB phone, APK file. Tested headless (`scripts/apps.mts`). |
+| `feat/scrcpy-stream` | draft PR #2 (base `main`) | Only the Tango packages are installed (see 4.1). No code yet. |
 
-Merge PR #1 first, then rebase `feat/scrcpy-stream` onto `main`.
+PR #1 is merged; continue on `feat/scrcpy-stream`.
 
 ### Layout
 
@@ -97,15 +97,15 @@ run downloads `system-images;android-35;google_apis;<abi>`; the Play flow also d
 - The Add-app dialog UI was only type-checked and built, not clicked through. Do a manual pass.
 - Not tested: a real Google sign-in and Install on the Play phone; a real USB phone.
 
-## 3. Before merging PR #1 (Add apps)
+## 3. Add apps: checks still open after merge
 
-- [ ] Manual UI pass of each Add-app tab (`npm run dev`).
+- [x] UI pass of the Store tab over CDP: featured list renders, Install (Tasks, AntennaPod) → Success.
+- [ ] UI pass of the Play, USB and APK-file tabs by hand.
 - [ ] Real Play test: sign in on the Play phone, install a free app (e.g. Wikipedia), and confirm
       base + splits are copied and the app starts on the capture phone.
 - [ ] Split-APK check: Play installs splits for ABI/density/language. Both phones are
       `pixel_7` and the same ABI, so splits should match. Confirm with one big app.
 - [ ] USB test with a real phone (USB debugging on).
-- [ ] Merge.
 
 ## 4. Roadmap (do in this order, one PR each)
 
