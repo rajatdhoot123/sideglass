@@ -38,6 +38,7 @@ ipcMain.handle('session:start', async () => {
   session.on('frame', (png: Buffer) => send('frame', 'capture', new Uint8Array(png)))
   session.on('play-frame', (png: Buffer) => send('frame', 'play', new Uint8Array(png)))
   session.on('store-log', (l) => send('store-log', l))
+  session.on('play-stage', (st) => send('play-stage', st))
   session.on('logcat', (lines) => send('logcat', lines))
   session.proxy.on('exchange', (e) => send('exchange', e))
   session.proxy.on('tls-failure', (f) => send('tls-failure', f))

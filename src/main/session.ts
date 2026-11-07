@@ -93,6 +93,7 @@ export class Session extends EventEmitter {
 
   play: PlayHelper | null = null
   private playCancelled = false
+  private playRunning: string | null = null
 
   private get downloads(): string {
     return join(this.dataDir, 'apks')
@@ -121,10 +122,21 @@ export class Session extends EventEmitter {
   async installFromPlay(link: string): Promise<string> {
     const pkg = packageFromPlayLink(link)
     if (!pkg) throw new Error('Paste a Play Store link (…details?id=com.example) or a package name')
+    if (this.playRunning) throw new Error(`Already getting ${this.playRunning}. Cancel it first.`)
+    this.playRunning = pkg
+    try {
+      return await this.runPlay(pkg)
+    } finally {
+      this.playRunning = null
+    }
+  }
+
+  private async runPlay(pkg: string): Promise<string> {
     if (!this.play) {
       this.play = new PlayHelper(this.sdk!)
       this.play.on('log', (l) => this.emit('store-log', l))
       this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
+      this.play.on('stage', (st) => this.emit('play-stage', st))
     }
     this.playCancelled = false
     this.emit('store-log', 'Starting the Play Store phone (first time: sign in with your Google account)…')
@@ -134,6 +146,7 @@ export class Session extends EventEmitter {
     this.emit('store-log', `Copying ${apks.length} APK file(s) to the capture phone…`)
     const result = await installApks(this.requireAdb(), apks)
     this.emit('store-log', `${pkg}: ${result}`)
+    this.emit('play-stage', { stage: 'done', message: `${pkg} is on the capture phone.` })
     return pkg
   }
 

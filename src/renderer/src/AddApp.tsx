@@ -5,7 +5,7 @@ import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
 type Source = 'store' | 'play' | 'usb' | 'file'
 
 /** Every way to get an app onto the capture phone. */
-export function AddApp({ onClose, onInstalled }: { onClose: () => void; onInstalled: () => void }) {
+export function AddApp({ onClose, onInstalled }: { onClose: () => void; onInstalled: (pkg?: string, open?: boolean) => void }) {
   const [source, setSource] = useState<Source>('store')
   const [log, setLog] = useState<string[]>([])
   useEffect(() => window.api.on('store-log', (l) => setLog((prev) => [...prev.slice(-30), l])), [])
@@ -49,7 +49,7 @@ export function AddApp({ onClose, onInstalled }: { onClose: () => void; onInstal
   )
 }
 
-type Props = { note: (l: string) => void; onInstalled: () => void }
+type Props = { note: (l: string) => void; onInstalled: (pkg?: string, open?: boolean) => void }
 
 function Store({ note, onInstalled }: Props) {
   const [query, setQuery] = useState('')
@@ -106,9 +106,18 @@ function Play({ note, onInstalled }: Props) {
   const [link, setLink] = useState('')
   const [running, setRunning] = useState(false)
   const [started, setStarted] = useState(false)
+  const [openWhenReady, setOpenWhenReady] = useState(true)
+  const [stage, setStage] = useState<{ stage: string; message: string } | null>(null)
+  useEffect(() => window.api.on('play-stage', setStage), [])
   return (
     <div className="play">
       <div className="play-left">
+        {stage && (
+          <div className={`banner ${stage.stage}`}>
+            {stage.stage === 'needs-user' ? 'Your turn: ' : ''}
+            {stage.message}
+          </div>
+        )}
         <p className="muted">
           Paste a Play Store link. Sideglass opens it on a second phone that has the Play Store. Sign in there once with
           your own Google account and tap <b>Install</b>; the app is then copied to the capture phone.
@@ -119,10 +128,11 @@ function Play({ note, onInstalled }: Props) {
             e.preventDefault()
             setRunning(true)
             setStarted(true)
+            setStage(null)
             try {
               const pkg = await window.api.installFromPlay(link)
-              note(`${pkg} is on the capture phone. Launch it from the list.`)
-              onInstalled()
+              note(`${pkg} is on the capture phone.`)
+              onInstalled(pkg, openWhenReady)
             } catch (err) {
               note((err as Error).message)
             } finally {
@@ -144,7 +154,12 @@ function Play({ note, onInstalled }: Props) {
             </button>
           )}
         </form>
+        <label className="small">
+          <input type="checkbox" checked={openWhenReady} onChange={(e) => setOpenWhenReady(e.target.checked)} /> Open
+          the app on the capture phone when it is ready
+        </label>
         <ul className="muted small">
+          <li>Sideglass taps Install for you and only stops when it needs you (sign-in, a prompt, a paid app).</li>
           <li>The Play phone keeps your sign-in between runs.</li>
           <li>Paid apps and apps not offered on this phone cannot be installed.</li>
           <li>The first start downloads the Play Store system image (about 1.5 GB).</li>
