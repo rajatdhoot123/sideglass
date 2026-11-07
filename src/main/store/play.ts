@@ -25,9 +25,45 @@ export function packageFromPlayLink(input: string): string | null {
  */
 export type PlayStage = 'needs-user' | 'installing' | 'copying' | 'done'
 
+class PlayStoreStubError extends Error {
+  constructor() {
+    super(
+      'The Play phone image does not contain the full Google Play Store (only the Android license checker was found).',
+    )
+    this.name = 'PlayStoreStubError'
+  }
+}
+
+/** True only when every reported path is the LicenseChecker stub, not Phonesky or another store APK. */
+function isLicenseCheckerOnly(pmPath: string): boolean {
+  const paths = pmPath
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('package:'))
+  return paths.length > 0 && paths.every((line) => /LicenseChecker/i.test(line))
+}
+
+/** `pm` often fails until package manager is up, which can be after sys.boot_completed. */
+async function readPlayStorePath(adb: Adb): Promise<string> {
+  const deadline = Date.now() + 20_000
+  let lastError = 'package manager did not answer'
+  while (Date.now() < deadline) {
+    try {
+      const out = await adb.shell('pm path com.android.vending')
+      if (out.trim()) return out
+      lastError = 'pm path returned no package'
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+  }
+  throw new Error(`Could not check Google Play on the Play phone: ${lastError}`)
+}
+
 export class PlayHelper extends EventEmitter {
   emulator: RunningEmulator | null = null
   screen: Screen | null = null
+  private storeChecked = false
 
   constructor(private readonly sdk: Sdk) {
     super()
@@ -36,19 +72,56 @@ export class PlayHelper extends EventEmitter {
   private log = (line: string) => this.emit('log', line)
 
   async start(): Promise<Adb> {
-    if (this.emulator) return this.emulator.adb
-    await ensureAvd(this.sdk, PLAY_PHONE, this.log)
-    this.emulator = await startEmulator(this.sdk, PLAY_PHONE, this.log)
-    const storeApk = await this.emulator.adb.shell('pm path com.android.vending').catch(() => '')
-    if (!storeApk.trim() || /LicenseChecker/i.test(storeApk)) {
-      await stopEmulator(this.emulator).catch(() => undefined)
-      this.emulator = null
-      throw new Error('The Play phone image does not contain the full Google Play Store (only the Android license checker was found).')
+    if (this.emulator && this.storeChecked) return this.emulator.adb
+    if (!this.emulator) {
+      await ensureAvd(this.sdk, PLAY_PHONE, this.log)
+      this.emulator = await startEmulator(this.sdk, PLAY_PHONE, this.log)
     }
-    this.screen = new Screen(this.emulator.adb)
+    try {
+      await this.ensureFullPlayStore()
+    } catch (error) {
+      if (!(error instanceof PlayStoreStubError)) throw error
+      // A snapshot boot can still be the LicenseChecker image. Cold-boot once before giving up.
+      const alreadyCold = this.emulator?.coldBoot ?? false
+      await this.discardEmulator()
+      if (alreadyCold) throw error
+      this.emulator = await startEmulator(this.sdk, PLAY_PHONE, this.log, undefined, true)
+      try {
+        await this.ensureFullPlayStore()
+      } catch (retryError) {
+        if (retryError instanceof PlayStoreStubError) await this.discardEmulator()
+        throw retryError
+      }
+    }
+    const emulator = this.emulator
+    if (!emulator) throw new Error('Play phone is not running')
+    await this.attachScreen(emulator)
+    return emulator.adb
+  }
+
+  /** Leave the phone running when `pm` fails. The caller shuts it down for a real stub. */
+  private async ensureFullPlayStore(): Promise<void> {
+    const emulator = this.emulator
+    if (!emulator) throw new Error('Play phone is not running')
+    const out = await readPlayStorePath(emulator.adb)
+    if (isLicenseCheckerOnly(out)) throw new PlayStoreStubError()
+    this.storeChecked = true
+  }
+
+  private async attachScreen(emulator: RunningEmulator): Promise<void> {
+    if (this.screen) return
+    this.screen = new Screen(emulator.adb)
     this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
     await this.screen.start()
-    return this.emulator.adb
+  }
+
+  private async discardEmulator(): Promise<void> {
+    const emulator = this.emulator
+    this.emulator = null
+    this.storeChecked = false
+    this.screen?.stop()
+    this.screen = null
+    if (emulator) await stopEmulator(emulator).catch(() => undefined)
   }
 
   /** Open the app's Play page. Returns true if it is already installed on the Play phone. */
@@ -138,5 +211,6 @@ export class PlayHelper extends EventEmitter {
     if (this.emulator) await stopEmulator(this.emulator)
     this.emulator = null
     this.screen = null
+    this.storeChecked = false
   }
 }
