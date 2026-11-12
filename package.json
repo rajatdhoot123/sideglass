@@ -9,7 +9,7 @@
     "start": "electron-vite preview",
     "typecheck": "tsc -p .",
     "smoke": "tsx scripts/smoke.mts",
-    "test": "tsx --test src/main/procnet.test.ts src/main/protobody.test.ts src/main/timeline.test.ts"
+    "test": "tsx --test src/main/procnet.test.ts src/main/protobody.test.ts src/main/timeline.test.ts src/main/clone/clone.test.ts"
   },
   "license": "Apache-2.0",
   "type": "commonjs",

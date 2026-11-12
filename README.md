@@ -39,6 +39,12 @@ left; the phone is on the right, and you click and drag on it to use it.
   - **From my phone:** pick an app on a USB-connected phone (USB debugging on) to copy it over.
   - **APK file:** drop APKs on the phone (split APKs together).
 - **Launch** an installed app from the list.
+- **Clone app:** pick an installed app, give it a new package name and name, and Sideglass installs
+  a second copy next to the original (base and split APKs). The binary manifest is rewritten: package,
+  relative class names, provider authorities, the app's own permissions and the launcher label.
+  The copy is signed with a Sideglass key, made once, using the SDK build-tools (`zipalign`, `apksigner`,
+  downloaded if missing). Apps that check their own signature, Google sign-in, Play licensing or
+  Play Integrity may refuse to run as a clone.
 - **Apps that check their Google Play licence** (PairIP, LVL): the first launch puts the real
   Play Store on the capture phone (copied from the Play phone, kept in its writable system), so
   the app runs where its traffic is captured. Sign in to Google Play there once with the account

@@ -7,7 +7,7 @@ import { Session } from './session'
 import { loadSettings, saveSettings } from './settings'
 import { findSdk } from './sdk'
 import { usbPhones } from './store/usb'
-import type { Settings } from '../shared'
+import type { CloneOptions, Settings } from '../shared'
 
 let session: Session | null = null
 let window: BrowserWindow | null = null
@@ -175,6 +175,7 @@ ipcMain.handle('usb:phones', () => {
 ipcMain.handle('usb:apps', (_, serial: string) => requireSession().usbApps(serial))
 ipcMain.handle('usb:install', (_, serial: string, pkg: string) => requireSession().installFromUsb(serial, pkg))
 ipcMain.handle('apps:list', () => requireSession().packages())
+ipcMain.handle('app:clone', (_, options: CloneOptions) => requireSession().cloneApp(options))
 ipcMain.handle('app:launch', (_, pkg: string) => requireSession().launch(pkg))
 ipcMain.handle('sms:send', (_, device: Device, from: string, text: string) => requireSession().sendSms(device, from, text))
 ipcMain.handle('har:export', async () => {

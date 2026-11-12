@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Device, LaunchResult, PhoneMode } from '../../shared'
 import { AddApp } from './AddApp'
+import { CloneApp } from './CloneApp'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
 
 /** The live phone: frames from the device; clicks and drags become taps and swipes. */
@@ -16,6 +17,8 @@ export function Phone({
   onLaunched: (pid: number | null, pkg?: string) => void
 }) {
   const [adding, setAdding] = useState(false)
+  const [cloning, setCloning] = useState(false)
+  const [lastApp, setLastApp] = useState<string | undefined>()
   const [apps, setApps] = useState<string[]>([])
   const [status, setStatus] = useState('')
   const [smsFrom, setSmsFrom] = useState('VM-HDFCBK')
@@ -26,6 +29,7 @@ export function Phone({
   useEffect(() => window.api.on('store-log', (line) => setStatus(line)), [])
 
   const showLaunch = (pkg: string, result: LaunchResult, idle: string) => {
+    setLastApp(pkg)
     onActiveDevice(result.device)
     // Logcat is the capture phone. A Play-phone pid would filter it to the wrong process.
     onLaunched(result.device === 'capture' ? result.pid : null, pkg)
@@ -89,6 +93,9 @@ export function Phone({
             Capture phone
           </button>
         )}
+        <button disabled={!apps.length} title="Install a renamed copy of an app next to the original" onClick={() => setCloning(true)}>
+          Clone app
+        </button>
         <button className="primary" onClick={() => setAdding(true)}>
           + Add app
         </button>
@@ -102,6 +109,24 @@ export function Phone({
             if (!pkg || !open) return
             // Close the dialog and open the app on the device that can run it.
             setAdding(false)
+            setStatus(`Starting ${pkg}…`)
+            try {
+              showLaunch(pkg, await window.api.launch(pkg), `${pkg} installed; it did not start by itself`)
+            } catch (error) {
+              setStatus(`Could not start ${pkg}: ${(error as Error).message}`)
+            }
+          }}
+        />
+      )}
+      {cloning && (
+        <CloneApp
+          apps={apps}
+          initial={lastApp}
+          onClose={() => setCloning(false)}
+          onCloned={async (pkg, open) => {
+            setApps(await window.api.apps())
+            if (!open) return
+            setCloning(false)
             setStatus(`Starting ${pkg}…`)
             try {
               showLaunch(pkg, await window.api.launch(pkg), `${pkg} installed; it did not start by itself`)
