@@ -66,6 +66,17 @@ export async function disablePlayProtectScans(adb: Adb): Promise<void> {
 }
 
 /**
+ * The emulator's host-side Bluetooth simulation (netsim) is not always available on a boot
+ * — a stale netsimd can keep holding the packet-streamer port — and then the guest Bluetooth
+ * stack finds no HCI controller and crash-loops with a "Bluetooth keeps stopping" dialog
+ * (SIGABRT in bt_stack_manage, "Can't start stack ... starting HciHal"). A capture phone has
+ * no use for Bluetooth, so its package is switched off; the disable survives reboots.
+ */
+export async function disableBluetoothStack(adb: Adb): Promise<void> {
+  await adb.shell('pm disable-user --user 0 com.android.bluetooth').catch(() => undefined)
+}
+
+/**
  * Launch the Magisk manager. "Activity does not exist" means either the package was really
  * removed (Play Protect) or a fresh boot has not finished scanning packages yet — wait and
  * retry when it is present, reinstall from our own copy when it is gone.

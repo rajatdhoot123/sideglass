@@ -10,6 +10,7 @@ import { cloneApp, type CloneOptions, type CloneResult } from './clone'
 import { hasPlayStore, needsPlayLicense } from './playstore'
 import {
   cachedRamdiskPath,
+  disableBluetoothStack,
   disablePlayProtectScans,
   ensureArtifacts,
   grantSu,
@@ -143,6 +144,7 @@ export class Session extends EventEmitter {
     this.emulator = emu
     await this.step('magisk', 'Setting up Magisk root', async () => {
       await disablePlayProtectScans(emu.adb)
+      await disableBluetoothStack(emu.adb)
       if (await suGranted(emu.adb)) {
         this.log('Root is available through Magisk su')
         return

@@ -104,6 +104,9 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 - Some apps still detect Frida or root. The hooks hide the common checks, and a determined check can still refuse.
 - Apps that pin below the hooks still show up under Refused TLS.
 - On the virtual phone, a request is tagged with the app that owned the socket when that can be told apart. USB phones are not tagged.
+- The virtual phone has Bluetooth switched off: the emulator's Bluetooth simulation does not
+  always start on a boot, and Android would then pop a "Bluetooth keeps stopping" dialog every
+  few seconds. Nothing Sideglass captures needs Bluetooth.
 - gRPC and protobuf bodies are shown as a field tree without a schema. A `.proto` file cannot be loaded yet.
 
 ## Roadmap
