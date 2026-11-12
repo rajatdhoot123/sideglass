@@ -40,7 +40,12 @@ function requireSession(): Session {
 }
 
 ipcMain.handle('session:start', async () => {
-  if (session) return
+  // A leftover session (for example its phone died under it) must not swallow the click.
+  if (session) {
+    const stale = session
+    session = null
+    await stale.stop().catch(() => undefined)
+  }
   const settings = loadSettings(settingsFile())
   if (!settings.phone) return
   const current = new Session(join(app.getPath('userData'), 'data'), settings)

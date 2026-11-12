@@ -79,7 +79,17 @@ export class CaptureProxy extends EventEmitter {
       passthrough: ['unknown-protocol'],
       recordTraffic: false,
     })
-    await server.start(port ? { startPort: port, endPort: port + 50 } : undefined)
+    try {
+      // Exactly this port: the emulator routes to it by name, so drifting to a neighbour
+      // port would silently send the phone's traffic nowhere.
+      await server.start(port ? { startPort: port, endPort: port } : undefined)
+    } catch (error) {
+      if (port)
+        throw new Error(
+          `Could not start the capture proxy on port ${port} — another Sideglass session may still be running. Stop it and try again.`,
+        )
+      throw error
+    }
     await server.forAnyRequest().thenPassThrough({ ignoreHostHttpsErrors: false })
     await server.forAnyWebSocket().thenPassThrough()
 

@@ -55,6 +55,39 @@ export async function magiskAppInstalled(adb: Adb): Promise<boolean> {
   return out.trim().startsWith('package:')
 }
 
+/**
+ * Play Protect flags Magisk's manager as harmful and can remove it — even while the phone
+ * sits idle between runs. This is a disposable test phone, so its app scans are turned off
+ * once here; installs and updates from the store itself keep working.
+ */
+export async function disablePlayProtectScans(adb: Adb): Promise<void> {
+  await adb.shell('settings put global package_verifier_enable 0').catch(() => undefined)
+  await adb.shell('settings put global verifier_verify_adb_installs 0').catch(() => undefined)
+}
+
+/**
+ * Launch the Magisk manager. "Activity does not exist" means either the package was really
+ * removed (Play Protect) or a fresh boot has not finished scanning packages yet — wait and
+ * retry when it is present, reinstall from our own copy when it is gone.
+ */
+async function openMagiskApp(adb: Adb, apk: string, log: (l: string) => void): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const out = await adb
+      .shell(`am start -n ${MAGISK_PACKAGE}/com.topjohnwu.magisk.ui.MainActivity`)
+      .catch((e: Error) => e.message)
+    if (!/does not exist|not been installed|Error type 3/i.test(out)) return
+    if (await magiskAppInstalled(adb)) {
+      log('Waiting for the Magisk app to finish loading...')
+      await sleep(10_000)
+    } else {
+      log('The Magisk app is missing (Play Protect may have removed it) — installing it again...')
+      await adb.exec(['install', '-r', apk], 300_000)
+      await sleep(3000)
+    }
+  }
+  throw new Error('The Magisk app would not start. Reinstall it manually and retry.')
+}
+
 /** Download the release APK once and extract the binaries the patch needs. */
 export async function ensureArtifacts(dataDir: string, log: (l: string) => void, abi = 'arm64-v8a'): Promise<MagiskArtifacts> {
   const dir = magiskDir(dataDir)
@@ -172,7 +205,12 @@ export async function suGranted(adb: Adb): Promise<boolean> {
  * resolution; if the UI cannot be driven, the promise rejects and the user is told
  * how to do the two taps themselves.
  */
-export async function grantSu(adb: Adb, log: (l: string) => void, timeoutMs = 10 * 60_000): Promise<void> {
+export async function grantSu(
+  adb: Adb,
+  apk: string,
+  log: (l: string) => void,
+  timeoutMs = 10 * 60_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs
   let rebootedForSetup = false
   while (Date.now() < deadline) {
@@ -185,12 +223,9 @@ export async function grantSu(adb: Adb, log: (l: string) => void, timeoutMs = 10
     }
     if (await suGranted(adb)) return
 
-    // Bring the Magisk app to the front (it may be closed after a setup reboot).
-    await adb
-      .shell(`am start -n ${MAGISK_PACKAGE}/com.topjohnwu.magisk.ui.MainActivity`)
-      .catch((e: Error) => {
-        throw new Error(`Magisk app is not installed (${e.message})`)
-      })
+    // Bring the Magisk app to the front (it may be closed after a setup reboot, or
+    // freshly booted — PackageManager can lag behind boot_completed for a few seconds).
+    await openMagiskApp(adb, apk, log)
     await new Promise((r) => setTimeout(r, 2500))
 
     const xml = await dumpUi(adb)

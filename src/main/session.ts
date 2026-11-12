@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { existsSync, writeFileSync } from 'node:fs'
+import { readFile, writeFile } from 'node:fs/promises'
 import { generateSPKIFingerprint } from 'mockttp'
 import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
@@ -9,6 +10,7 @@ import { cloneApp, type CloneOptions, type CloneResult } from './clone'
 import { hasPlayStore, needsPlayLicense } from './playstore'
 import {
   cachedRamdiskPath,
+  disablePlayProtectScans,
   ensureArtifacts,
   grantSu,
   magiskAppInstalled,
@@ -120,11 +122,27 @@ export class Session extends EventEmitter {
     await this.step('avd', 'Preparing virtual phone', () => ensureAvd(sdk, CAPTURE_PHONE, this.log))
     const stock = ramdiskOf(sdk, CAPTURE_PHONE)
     const cached = existsSync(stock) ? cachedRamdiskPath(this.dataDir, stock) : ''
-    let emu = await this.step('boot', 'Booting virtual phone', () =>
-      startEmulator(sdk, CAPTURE_PHONE, this.log, port, cached && existsSync(cached) ? cached : undefined),
-    )
+    let emu = await this.step('boot', 'Booting virtual phone', async () => {
+      // Only adopt a phone this app booted (see emulator.json): one started by hand or left
+      // by another tool has no capture proxy, and its traffic would never reach us.
+      const recordPath = join(this.dataDir, 'emulator.json')
+      const serial = `emulator-${CAPTURE_PHONE.port}`
+      const record = existsSync(recordPath)
+        ? (JSON.parse(await readFile(recordPath, 'utf8').catch(() => 'null')) as { proxyPort?: number } | null)
+        : null
+      const running = (await Adb.devices(sdk.adb)).some((d) => d.serial === serial && d.state === 'device')
+      if (running && record?.proxyPort !== port) {
+        this.log('The running phone was not started for this session — restarting it with capture routing...')
+        await new Adb(sdk.adb, serial).exec(['emu', 'kill']).catch(() => undefined)
+        await new Promise((r) => setTimeout(r, 3000))
+      }
+      const started = await startEmulator(sdk, CAPTURE_PHONE, this.log, port, cached && existsSync(cached) ? cached : undefined)
+      await writeFile(recordPath, JSON.stringify({ proxyPort: port, at: Date.now() })).catch(() => undefined)
+      return started
+    })
     this.emulator = emu
     await this.step('magisk', 'Setting up Magisk root', async () => {
+      await disablePlayProtectScans(emu.adb)
       if (await suGranted(emu.adb)) {
         this.log('Root is available through Magisk su')
         return
@@ -141,7 +159,7 @@ export class Session extends EventEmitter {
         emu = await startEmulator(sdk, CAPTURE_PHONE, this.log, port, patched)
         this.emulator = emu
       }
-      await grantSu(emu.adb, this.log)
+      await grantSu(emu.adb, artifacts.apk, this.log)
     })
     await this.step('trust', 'Installing certificate as a system CA', async () => {
       await this.trust(emu.adb, ca)
