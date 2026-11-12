@@ -1,10 +1,12 @@
 import type { LogLine } from './main/logcat'
 import type { ExchangeSummary, Exchange, TlsFailure } from './main/proxy'
 import type { Progress } from './main/session'
+import type { Refusal, RefusalKind } from './main/refusal'
+import type { HooksSnapshot } from './main/hooks'
 import type { StoreApp } from './main/store/fdroid'
 import type { UsbPhone } from './main/store/usb'
 
-export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone }
+export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, Refusal, RefusalKind, HooksSnapshot, StoreApp, UsbPhone }
 export type Device = 'capture' | 'play'
 
 /** What the window can ask the main process to do. */
@@ -28,6 +30,8 @@ export interface Api {
   pathForFile(file: File): string
   apps(): Promise<string[]>
   launch(pkg: string): Promise<number | null>
+  setHooks(enabled: boolean): Promise<HooksSnapshot>
+  hooksState(): Promise<HooksSnapshot>
   sendSms(from: string, text: string): Promise<void>
   exportHar(): Promise<string | null>
   on(channel: 'progress', cb: (p: Progress) => void): () => void
@@ -38,6 +42,9 @@ export interface Api {
   on(channel: 'store-log', cb: (line: string) => void): () => void
   on(channel: 'play-stage', cb: (stage: { stage: 'needs-user' | 'installing' | 'copying' | 'done'; message: string }) => void): () => void
   on(channel: 'logcat', cb: (lines: LogLine[]) => void): () => void
+  on(channel: 'hooks-log', cb: (line: string) => void): () => void
+  on(channel: 'hooks-state', cb: (snapshot: HooksSnapshot) => void): () => void
+  on(channel: 'app-refusal', cb: (refusal: Refusal) => void): () => void
 }
 
 declare global {

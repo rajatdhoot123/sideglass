@@ -109,3 +109,5 @@ button:disabled { opacity: 0.5; cursor: default; }
 .banner.needs-user { border-color: var(--warn); background: #2b2412; color: #ffe2a3; font-weight: 500; }
 .banner.installing, .banner.copying { border-color: var(--accent); }
 .banner.done { border-color: var(--ok); color: var(--ok); }
+button.on { border-color: var(--accent); color: var(--accent); }
+.right .banner { margin: 0; font-size: 12px; }

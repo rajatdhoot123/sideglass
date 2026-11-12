@@ -25,8 +25,12 @@
   },
   "dependencies": {
     "@peculiar/x509": "^1.14.3",
+    "frida": "17.26.2",
     "mockttp": "^4.6.5",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
+  },
+  "allowScripts": {
+    "frida@17.26.2": true
   }
 }

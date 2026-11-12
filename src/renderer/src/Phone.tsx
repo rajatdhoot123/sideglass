@@ -1,16 +1,58 @@
 import { useEffect, useState } from 'react'
+import type { Refusal, RefusalKind } from '../../shared'
 import { AddApp } from './AddApp'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
+
+const REASONS: Record<RefusalKind, string> = {
+  integrity: 'an integrity check (Play Integrity or Play Protect)',
+  root: 'a root check',
+  emulator: 'an emulator check',
+  frida: 'a hooking (Frida) check',
+  crash: 'a crash',
+}
 
 /** The live phone: frames from the device; clicks and drags become taps and swipes. */
 export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void }) {
   const [adding, setAdding] = useState(false)
   const [apps, setApps] = useState<string[]>([])
   const [status, setStatus] = useState('')
+  const [hooksOn, setHooksOn] = useState(true)
+  const [hooksReady, setHooksReady] = useState(false)
+  const [hooksMsg, setHooksMsg] = useState('')
+  const [refusal, setRefusal] = useState<Refusal | null>(null)
   const [smsFrom, setSmsFrom] = useState('VM-HDFCBK')
   const [smsText, setSmsText] = useState('Rs.500.00 debited from A/c XX1234 on 07-11-26 to ZOMATO. UPI Ref 512345678901')
   const [dragging, setDragging] = useState(false)
-  useEffect(() => void window.api.apps().then(setApps), [])
+  useEffect(() => {
+    void window.api.apps().then(setApps)
+    void window.api.hooksState().then((s) => {
+      setHooksOn(s.enabled)
+      setHooksReady(s.ready)
+    })
+    return [
+      window.api.on('hooks-log', (line) => setHooksMsg(line)),
+      window.api.on('hooks-state', (s) => {
+        setHooksOn(s.enabled)
+        setHooksReady(s.ready)
+        if (!s.ready && s.message) setHooksMsg(`Hooks unavailable: ${s.message}`)
+      }),
+      window.api.on('app-refusal', (r) => setRefusal(r)),
+    ].reduce((off, next) => {
+      const prev = off
+      return () => {
+        prev()
+        next()
+      }
+    })
+  }, [])
+
+  const launch = async (pkg: string) => {
+    setRefusal(null)
+    setStatus(`Starting ${pkg}…`)
+    const pid = await window.api.launch(pkg)
+    onLaunched(pid)
+    setStatus(pid ? `${pkg} running (pid ${pid})${hooksOn ? ', with hooks' : ''}` : `${pkg} did not start`)
+  }
 
   const install = async (files: FileList) => {
     const paths = [...files].map((f) => window.api.pathForFile(f)).filter((p) => p.endsWith('.apk'))
@@ -44,10 +86,7 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
           defaultValue=""
           onChange={async (e) => {
             if (!e.target.value) return
-            setStatus(`Starting ${e.target.value}…`)
-            const pid = await window.api.launch(e.target.value)
-            onLaunched(pid)
-            setStatus(pid ? `${e.target.value} running (pid ${pid})` : `${e.target.value} did not start`)
+            await launch(e.target.value)
           }}
         >
           <option value="">Launch app…</option>
@@ -55,11 +94,28 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
             <option key={a}>{a}</option>
           ))}
         </select>
+        <button
+          className={hooksOn ? 'on' : ''}
+          title="Start apps through Frida: trust the Sideglass CA, drop certificate pinning, hide root and emulator checks, rewrite locally-read integrity verdicts"
+          onClick={async () => {
+            const s = await window.api.setHooks(!hooksOn)
+            setHooksOn(s.enabled)
+          }}
+        >
+          Hooks {hooksOn ? (hooksReady ? 'on' : 'starting…') : 'off'}
+        </button>
         <button onClick={() => void window.api.apps().then(setApps)}>↻</button>
         <button className="primary" onClick={() => setAdding(true)}>
           + Add app
         </button>
       </div>
+      {refusal && (
+        <div className="banner needs-user">
+          <strong>{refusal.pkg} refused to run</strong> — {REASONS[refusal.kind]}. What it did before the check is
+          still captured; a verdict its own server verifies cannot be unlocked from here.{' '}
+          <span className="muted">{refusal.sample}</span>
+        </div>
+      )}
       {adding && (
         <AddApp
           onClose={() => setAdding(false)}
@@ -68,10 +124,7 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
             if (!pkg || !open) return
             // Hand back to the capture phone: close the dialog and open the new app.
             setAdding(false)
-            setStatus(`Starting ${pkg}…`)
-            const pid = await window.api.launch(pkg)
-            onLaunched(pid)
-            setStatus(pid ? `${pkg} running (pid ${pid})` : `${pkg} installed; it did not start by itself`)
+            await launch(pkg)
           }}
         />
       )}
@@ -84,7 +137,7 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
         <textarea value={smsText} onChange={(e) => setSmsText(e.target.value)} rows={3} />
         <button onClick={() => void window.api.sendSms(smsFrom, smsText).then(() => setStatus('SMS sent'))}>Send</button>
       </details>
-      <div className="status">{status || 'Drop an APK here to install it.'}</div>
+      <div className="status">{status || hooksMsg || 'Drop an APK here to install it.'}</div>
     </section>
   )
 }

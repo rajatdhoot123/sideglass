@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld('api', {
   pathForFile: (file: File) => webUtils.getPathForFile(file),
   apps: invoke('apps:list'),
   launch: invoke('app:launch'),
+  setHooks: invoke('hooks:set'),
+  hooksState: invoke('hooks:state'),
   sendSms: invoke('sms:send'),
   exportHar: invoke('har:export'),
   on: (channel: string, cb: (...args: unknown[]) => void) => {

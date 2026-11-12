@@ -2,14 +2,16 @@ import { EventEmitter } from 'node:events'
 import { generateSPKIFingerprint } from 'mockttp'
 import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
-import { CAPTURE_PHONE, ensureAvd, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
+import { CAPTURE_PHONE, ensureAvd, IMAGE_ABI, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
 import { installApks, pullApp } from './store/apk'
 import { FEATURED, installFromFdroid, search as searchFdroid } from './store/fdroid'
 import { packageFromPlayLink, PlayHelper } from './store/play'
 import { usbPhones, userApps } from './store/usb'
 import { Adb } from './adb'
-import { Logcat } from './logcat'
+import { Hooks, type HooksSnapshot } from './hooks'
+import { Logcat, type LogLine } from './logcat'
 import { CaptureProxy } from './proxy'
+import { classifyRefusal, type Refusal } from './refusal'
 import { Screen } from './screen'
 import { findSdk, type Sdk } from './sdk'
 
@@ -28,6 +30,10 @@ export class Session extends EventEmitter {
   emulator: RunningEmulator | null = null
   screen: Screen | null = null
   logcat: Logcat | null = null
+  private hooks: Hooks | null = null
+  private hooksEnabled = true
+  /** Apps we launched, so logcat can be watched for them refusing to run. */
+  private refusals = new Map<string, { pid: number | null; seen: Set<Refusal['kind']> }>()
 
   constructor(private readonly dataDir: string) {
     super()
@@ -86,7 +92,10 @@ export class Session extends EventEmitter {
     this.screen.on('frame', (png: Buffer) => this.emit('frame', png))
     await this.screen.start()
     this.logcat = new Logcat(emu.adb)
-    this.logcat.on('lines', (lines) => this.emit('logcat', lines))
+    this.logcat.on('lines', (lines: LogLine[]) => {
+      this.emit('logcat', lines)
+      this.checkRefusals(lines)
+    })
     this.logcat.start()
     this.progress('ready', 'done', 'Ready')
   }
@@ -179,11 +188,71 @@ export class Session extends EventEmitter {
       .sort()
   }
 
-  /** Restart an app so it starts in a process that sees our CA. */
-  async launch(pkg: string): Promise<void> {
+  /**
+   * Start an app. With hooks enabled (the default), it starts suspended through
+   * Frida and gets the agent before its first line runs; otherwise it starts
+   * normally. Returns the pid, or null if the app never came up.
+   */
+  async launch(pkg: string): Promise<number | null> {
     const adb = this.requireAdb()
+    this.refusals.delete(pkg)
+    if (this.hooksEnabled) {
+      try {
+        const pid = await this.getHooks().launch(pkg)
+        this.watch(pkg, pid)
+        return pid
+      } catch (error) {
+        this.emit('hooks-log', `Hooks unavailable (${(error as Error).message}); launching normally`)
+      }
+    }
     await adb.shell(`am force-stop ${pkg}`)
     await adb.shell(`monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`)
+    for (let i = 0; i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 500))
+      const pid = await this.pidOf(pkg)
+      if (pid) {
+        this.watch(pkg, pid)
+        return pid
+      }
+    }
+    return null
+  }
+
+  /** Watch logcat from a launched app so the UI can say why it refused to run. */
+  private watch(pkg: string, pid: number | null): void {
+    this.refusals.set(pkg, { pid, seen: new Set() })
+  }
+
+  private checkRefusals(lines: LogLine[]): void {
+    for (const [pkg, info] of this.refusals) {
+      const hit = classifyRefusal(lines, pkg, info.pid)
+      if (hit && !info.seen.has(hit.kind)) {
+        info.seen.add(hit.kind)
+        this.emit('app-refusal', hit)
+      }
+    }
+  }
+
+  private getHooks(): Hooks {
+    if (!this.hooks) {
+      this.hooks = new Hooks(() => this.requireAdb(), IMAGE_ABI, join(this.dataDir, 'frida'), {
+        log: (line) => this.emit('hooks-log', line),
+        state: (snapshot) => this.emit('hooks-state', snapshot),
+      })
+    }
+    return this.hooks
+  }
+
+  setHooksEnabled(on: boolean): HooksSnapshot {
+    this.hooksEnabled = on
+    const snapshot = this.hooksState()
+    if (this.hooks) this.hooks.enabled = on
+    this.emit('hooks-state', snapshot)
+    return snapshot
+  }
+
+  hooksState(): HooksSnapshot {
+    return this.hooks?.snapshot() ?? { enabled: this.hooksEnabled, ready: false, message: '' }
   }
 
   async pidOf(pkg: string): Promise<number | null> {
@@ -203,6 +272,7 @@ export class Session extends EventEmitter {
   async stop(): Promise<void> {
     this.screen?.stop()
     this.logcat?.stop()
+    await this.hooks?.stop().catch(() => undefined)
     await this.play?.stop().catch(() => undefined)
     if (this.emulator) await stopEmulator(this.emulator)
     await this.proxy.stop()
