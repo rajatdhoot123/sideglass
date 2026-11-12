@@ -184,7 +184,9 @@ export async function startEmulator(
   const serial = `emulator-${spec.port}`
   const running = await Adb.devices(sdk.adb)
   const existing = running.find((d) => d.serial === serial)
-  if (existing && existing.state !== 'device') {
+  // An offline serial is a guest that is already dying. Waiting on it when a ramdisk
+  // must be loaded just burns the boot timeout; kill it and start fresh instead.
+  if (existing && existing.state !== 'device' && !forceColdBoot) {
     log(`Waiting for ${serial} to finish booting…`)
     await new Adb(sdk.adb, serial).waitForBoot()
   }
@@ -213,8 +215,7 @@ export async function startEmulator(
   const args = ['-avd', spec.avd, '-port', String(spec.port), '-no-window', '-no-boot-anim', '-no-audio', '-gpu', 'auto']
   if (ramdisk) args.push('-ramdisk', ramdisk, '-no-snapshot')
   else if (coldBoot) args.push('-no-snapshot-load')
-  // The capture phone always cold-boots into a clean state; the Play phone keeps its sign-in.
-  // -writable-system keeps the Play Store that replaces the LicenseChecker stub.
+  // A snapshot would restore a boot that already happened. Userdata (sign-in, apps) stays.
   if (proxyPort) args.push('-no-snapshot-save', '-writable-system', '-http-proxy', `http://127.0.0.1:${proxyPort}`)
   const child = await bootEmulator(sdk, spec, log, args)
   log(`${serial} booted`)
@@ -268,6 +269,7 @@ async function bootEmulator(sdk: Sdk, spec: PhoneSpec, log: Log, args: string[])
 export async function stopEmulator(emu: RunningEmulator): Promise<void> {
   await emu.adb.exec(['emu', 'kill']).catch(() => undefined)
   emu.process?.kill()
+  await emu.adb.untilGone().catch(() => undefined)
 }
 
 export async function sdkVersion(adb: Adb): Promise<number> {
