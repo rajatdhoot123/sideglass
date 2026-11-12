@@ -73,6 +73,10 @@ function lockHeld(lockPath: string): boolean {
   } catch {
     return true
   }
+  // An empty file carries no pid. multiinstance.lock is always empty (qemu holds it with an
+  // OS file lock), and stays behind after `emu kill`. A running emulator also writes its pid to
+  // hardware-qemu.ini.lock, so treating an empty file as free never misses a live one.
+  if (!text.trim()) return false
   const pid = Number(text.trim())
   if (!Number.isInteger(pid) || pid <= 0) return true
   try {
