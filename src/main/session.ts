@@ -15,6 +15,14 @@ import { classifyRefusal, type Refusal } from './refusal'
 import { Screen } from './screen'
 import { findSdk, type Sdk } from './sdk'
 
+export interface LaunchResult {
+  pid: number | null
+  /** True only when this start injected the agent. A plain-launch fallback is false. */
+  hooked: boolean
+  /** Set when hooks were on but this start fell back to a normal launch. */
+  fallback: string | null
+}
+
 export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'root' | 'trust' | 'ready'
 export interface Progress {
   step: StepId
@@ -190,21 +198,28 @@ export class Session extends EventEmitter {
 
   /**
    * Start an app. With hooks enabled (the default), it starts suspended through
-   * Frida and gets the agent before its first line runs; otherwise it starts
-   * normally. Returns the pid, or null if the app never came up.
+   * Frida and gets the agent before its first line runs. If that fails, the app
+   * still starts normally and `hooked` is false.
    */
-  async launch(pkg: string): Promise<number | null> {
+  async launch(pkg: string): Promise<LaunchResult> {
     const adb = this.requireAdb()
     this.refusals.delete(pkg)
     if (this.hooksEnabled) {
       try {
         const pid = await this.getHooks().launch(pkg)
         this.watch(pkg, pid)
-        return pid
+        return { pid, hooked: true, fallback: null }
       } catch (error) {
-        this.emit('hooks-log', `Hooks unavailable (${(error as Error).message}); launching normally`)
+        const fallback = `Hooks unavailable (${(error as Error).message}); launching normally`
+        this.emit('hooks-log', fallback)
+        const plain = await this.launchPlain(adb, pkg)
+        return { ...plain, fallback }
       }
     }
+    return { ...(await this.launchPlain(adb, pkg)), fallback: null }
+  }
+
+  private async launchPlain(adb: Adb, pkg: string): Promise<Pick<LaunchResult, 'pid' | 'hooked'>> {
     await adb.shell(`am force-stop ${pkg}`)
     await adb.shell(`monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`)
     for (let i = 0; i < 8; i++) {
@@ -212,10 +227,10 @@ export class Session extends EventEmitter {
       const pid = await this.pidOf(pkg)
       if (pid) {
         this.watch(pkg, pid)
-        return pid
+        return { pid, hooked: false }
       }
     }
-    return null
+    return { pid: null, hooked: false }
   }
 
   /** Watch logcat from a launched app so the UI can say why it refused to run. */
@@ -245,14 +260,17 @@ export class Session extends EventEmitter {
 
   setHooksEnabled(on: boolean): HooksSnapshot {
     this.hooksEnabled = on
-    const snapshot = this.hooksState()
+    // Snapshot reads Hooks.enabled. Update it first, or the switch sticks on the old value.
     if (this.hooks) this.hooks.enabled = on
+    const snapshot = this.hooksState()
     this.emit('hooks-state', snapshot)
     return snapshot
   }
 
   hooksState(): HooksSnapshot {
-    return this.hooks?.snapshot() ?? { enabled: this.hooksEnabled, ready: false, message: '' }
+    const live = this.hooks?.snapshot()
+    if (!live) return { enabled: this.hooksEnabled, ready: false, starting: false, message: '' }
+    return { ...live, enabled: this.hooksEnabled }
   }
 
   async pidOf(pkg: string): Promise<number | null> {

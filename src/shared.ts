@@ -1,12 +1,12 @@
 import type { LogLine } from './main/logcat'
 import type { ExchangeSummary, Exchange, TlsFailure } from './main/proxy'
-import type { Progress } from './main/session'
+import type { LaunchResult, Progress } from './main/session'
 import type { Refusal, RefusalKind } from './main/refusal'
 import type { HooksSnapshot } from './main/hooks'
 import type { StoreApp } from './main/store/fdroid'
 import type { UsbPhone } from './main/store/usb'
 
-export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, Refusal, RefusalKind, HooksSnapshot, StoreApp, UsbPhone }
+export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, LaunchResult, Refusal, RefusalKind, HooksSnapshot, StoreApp, UsbPhone }
 export type Device = 'capture' | 'play'
 
 /** What the window can ask the main process to do. */
@@ -29,7 +29,7 @@ export interface Api {
   installFromUsb(serial: string, pkg: string): Promise<string>
   pathForFile(file: File): string
   apps(): Promise<string[]>
-  launch(pkg: string): Promise<number | null>
+  launch(pkg: string): Promise<LaunchResult>
   setHooks(enabled: boolean): Promise<HooksSnapshot>
   hooksState(): Promise<HooksSnapshot>
   sendSms(from: string, text: string): Promise<void>

@@ -17,7 +17,7 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
   const [apps, setApps] = useState<string[]>([])
   const [status, setStatus] = useState('')
   const [hooksOn, setHooksOn] = useState(true)
-  const [hooksReady, setHooksReady] = useState(false)
+  const [hooksStarting, setHooksStarting] = useState(false)
   const [hooksMsg, setHooksMsg] = useState('')
   const [refusal, setRefusal] = useState<Refusal | null>(null)
   const [smsFrom, setSmsFrom] = useState('VM-HDFCBK')
@@ -27,13 +27,13 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
     void window.api.apps().then(setApps)
     void window.api.hooksState().then((s) => {
       setHooksOn(s.enabled)
-      setHooksReady(s.ready)
+      setHooksStarting(s.starting)
     })
     return [
       window.api.on('hooks-log', (line) => setHooksMsg(line)),
       window.api.on('hooks-state', (s) => {
         setHooksOn(s.enabled)
-        setHooksReady(s.ready)
+        setHooksStarting(s.starting)
         if (!s.ready && s.message) setHooksMsg(`Hooks unavailable: ${s.message}`)
       }),
       window.api.on('app-refusal', (r) => setRefusal(r)),
@@ -49,9 +49,12 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
   const launch = async (pkg: string) => {
     setRefusal(null)
     setStatus(`Starting ${pkg}…`)
-    const pid = await window.api.launch(pkg)
-    onLaunched(pid)
-    setStatus(pid ? `${pkg} running (pid ${pid})${hooksOn ? ', with hooks' : ''}` : `${pkg} did not start`)
+    const result = await window.api.launch(pkg)
+    onLaunched(result.pid)
+    const running = result.pid
+      ? `${pkg} running (pid ${result.pid})${result.hooked ? ', with hooks' : ''}`
+      : `${pkg} did not start`
+    setStatus(result.fallback ? `${running}. ${result.fallback}` : running)
   }
 
   const install = async (files: FileList) => {
@@ -100,9 +103,10 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
           onClick={async () => {
             const s = await window.api.setHooks(!hooksOn)
             setHooksOn(s.enabled)
+            setHooksStarting(s.starting)
           }}
         >
-          Hooks {hooksOn ? (hooksReady ? 'on' : 'starting…') : 'off'}
+          Hooks {hooksOn ? (hooksStarting ? 'starting…' : 'on') : 'off'}
         </button>
         <button onClick={() => void window.api.apps().then(setApps)}>↻</button>
         <button className="primary" onClick={() => setAdding(true)}>
@@ -112,7 +116,8 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
       {refusal && (
         <div className="banner needs-user">
           <strong>{refusal.pkg} refused to run</strong> — {REASONS[refusal.kind]}. What it did before the check is
-          still captured; a verdict its own server verifies cannot be unlocked from here.{' '}
+          still captured
+          {refusal.kind === 'integrity' ? '; a verdict its own server verifies cannot be unlocked from here' : ''}.{' '}
           <span className="muted">{refusal.sample}</span>
         </div>
       )}

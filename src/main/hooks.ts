@@ -18,6 +18,8 @@ const FRIDA_ABI: Record<string, string> = { 'arm64-v8a': 'arm64', x86_64: 'x86_6
 export interface HooksSnapshot {
   enabled: boolean
   ready: boolean
+  /** True only while frida-server is being pushed and started, not merely because it is not ready yet. */
+  starting: boolean
   message: string
 }
 
@@ -25,6 +27,8 @@ export interface HooksEvents {
   log: (line: string) => void
   state: (snapshot: HooksSnapshot) => void
 }
+
+const INJECT_TIMEOUT_MS = 20_000
 
 /**
  * Runs frida-server on the capture phone and starts apps through it, so the agent
@@ -37,6 +41,7 @@ export class Hooks {
   message = ''
 
   private device: Device | null = null
+  private starting = false
   private active = new Map<string, { session: Session; script: Script }>()
 
   constructor(
@@ -47,7 +52,7 @@ export class Hooks {
   ) {}
 
   snapshot(): HooksSnapshot {
-    return { enabled: this.enabled, ready: this.ready, message: this.message }
+    return { enabled: this.enabled, ready: this.ready, starting: this.starting, message: this.message }
   }
 
   private say(line: string): void {
@@ -64,25 +69,65 @@ export class Hooks {
     const adb = this.getAdb()
     await adb.shell(`am force-stop ${pkg}`)
     await this.unload(pkg)
-    const pid = await device.spawn(pkg)
-    const session = await device.attach(pid)
-    const script = await session.createScript(AGENT_SOURCE)
+    let spawned: number | null = null
+    let abandoned = false
+    const attempt = (async () => {
+      const pid = await device.spawn(pkg)
+      spawned = pid
+      // Timeout does not cancel spawn. Kill a process that arrived after we gave up.
+      const stopIfAbandoned = async () => {
+        if (!abandoned) return
+        await device.kill(pid).catch(() => undefined)
+        throw new Error('hook injection abandoned')
+      }
+      await stopIfAbandoned()
+      const session = await device.attach(pid)
+      await stopIfAbandoned()
+      const script = await session.createScript(AGENT_SOURCE)
+      this.observeScript(pkg, script)
+      await stopIfAbandoned()
+      await script.load()
+      await stopIfAbandoned()
+      await device.resume(pid)
+      await stopIfAbandoned()
+      this.active.set(pkg, { session, script })
+      return pid
+    })()
+    // The timeout rejects without cancelling the RPC. Swallow that late rejection.
+    void attempt.catch(() => undefined)
+    try {
+      return await withTimeout(attempt, INJECT_TIMEOUT_MS, 'Hook injection')
+    } catch (error) {
+      abandoned = true
+      // A server that accepts the port and then never answers keeps a dead handle.
+      this.dropDevice()
+      if (spawned !== null) await withTimeout(device.kill(spawned), 3_000, 'kill').catch(() => undefined)
+      throw error
+    }
+  }
+
+  private observeScript(pkg: string, script: Script): void {
     const scriptMessages = (script as unknown as { message?: { connect(cb: (raw: unknown) => void): void } }).message
     scriptMessages?.connect((raw) => {
       const msg = raw as { type?: string; payload?: { sg?: string; text?: string }; description?: string }
       if (msg?.type === 'send' && msg.payload?.sg === 'log') this.say(`${pkg}: ${msg.payload.text}`)
       else if (msg?.type === 'error') this.say(`${pkg}: hook error: ${msg.description ?? 'unknown'}`)
     })
-    await script.load()
-    await device.resume(pid)
-    this.active.set(pkg, { session, script })
-    return pid
+  }
+
+  /** Drop the cached handle so the next launch pushes and starts frida-server again. */
+  private dropDevice(): void {
+    this.device = null
+    this.ready = false
+    this.starting = false
+    this.announce()
   }
 
   async stop(): Promise<void> {
     for (const pkg of [...this.active.keys()]) await this.unload(pkg)
     this.device = null
     this.ready = false
+    this.starting = false
     this.message = ''
     this.announce()
   }
@@ -98,27 +143,39 @@ export class Hooks {
   /** Push frida-server if needed, start it, and connect through an adb forward. */
   private async ensureDevice(): Promise<Device> {
     if (this.device) return this.device
-    const adb = this.getAdb()
-    const local = await this.ensureLocalBinary()
-    this.say('Starting launch hooks (frida-server)...')
-
-    // Restarting is idempotent: a stale server would refuse the port.
-    await adb.shell('kill $(pidof .sgsys) 2>/dev/null; true')
-    await adb.execBuffer(['push', local, DEVICE_BIN], 120_000)
-    await adb.shell(`chmod 700 ${DEVICE_BIN}`)
-    // nohup + & detaches: the adb shell call returns while the server keeps running.
-    await adb
-      .exec(['shell', `nohup ${DEVICE_BIN} -l 127.0.0.1:${SERVER_PORT} >/dev/null 2>&1 &`], 10_000)
-      .catch(() => undefined)
-    await adb.exec(['forward', `tcp:${SERVER_PORT}`, `tcp:${SERVER_PORT}`])
-    await this.waitPort()
-    const manager = await frida.getDeviceManager()
-    this.device = await manager.addRemoteDevice(`127.0.0.1:${SERVER_PORT}`)
-    this.ready = true
+    this.starting = true
     this.message = ''
     this.announce()
-    this.say('Launch hooks ready')
-    return this.device
+    try {
+      const adb = this.getAdb()
+      const local = await this.ensureLocalBinary()
+      this.say('Starting launch hooks (frida-server)...')
+
+      // Restarting is idempotent: a stale server would refuse the port.
+      await adb.shell('kill $(pidof .sgsys) 2>/dev/null; true')
+      await adb.execBuffer(['push', local, DEVICE_BIN], 120_000)
+      await adb.shell(`chmod 700 ${DEVICE_BIN}`)
+      // nohup + & detaches: the adb shell call returns while the server keeps running.
+      await adb
+        .exec(['shell', `nohup ${DEVICE_BIN} -l 127.0.0.1:${SERVER_PORT} >/dev/null 2>&1 &`], 10_000)
+        .catch(() => undefined)
+      await adb.exec(['forward', `tcp:${SERVER_PORT}`, `tcp:${SERVER_PORT}`])
+      await this.waitPort()
+      const manager = await frida.getDeviceManager()
+      this.device = await manager.addRemoteDevice(`127.0.0.1:${SERVER_PORT}`)
+      this.ready = true
+      this.message = ''
+      this.say('Launch hooks ready')
+      return this.device
+    } catch (error) {
+      this.device = null
+      this.ready = false
+      this.message = (error as Error).message
+      throw error
+    } finally {
+      this.starting = false
+      this.announce()
+    }
   }
 
   private waitPort(timeoutMs = 20_000): Promise<void> {
@@ -165,6 +222,23 @@ export class Hooks {
     writeFileSync(target, raw)
     return target
   }
+}
+
+function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)
+    timer.unref()
+    work.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
 }
 
 /** .xz without a dependency: try the decompressors that ship with dev machines. */

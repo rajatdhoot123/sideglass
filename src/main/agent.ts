@@ -23,6 +23,8 @@ function sgLog(level, text) { send({ sg: 'log', level: level, text: String(text)
 function sgTry(name, fn) {
   try { fn(); sgLog('debug', name + ' ok') } catch (e) { sgLog('debug', name + ' skipped (' + e + ')') }
 }
+var pinned = []
+function pin(cb) { pinned.push(cb); return cb }
 
 /* --- what a normal phone looks like --- */
 
@@ -121,16 +123,22 @@ function stringToBytes(s) {
   return b
 }
 
-/** If the string is a locally-readable Play Integrity / SafetyNet JWS, rewrite it to pass. */
+/** Rewrite a decoded 3-part JWS. Play Integrity token() is a 5-part JWE; those bytes are not a verdict we can sign. */
 function rewriteVerdicts(s) {
   if (typeof s !== 'string') return s
   var parts = s.split('.')
   if (parts.length !== 3) return s
   var payload
   try { payload = JSON.parse(bytesToString(b64urlToBytes(parts[1]))) } catch (e) { return s }
+  if (payload === null || typeof payload !== 'object') return s
   var changed = false
-  if (payload.deviceIntegrity !== undefined) {
-    payload.deviceIntegrity = ['MEETS_DEVICE_INTEGRITY', 'MEETS_BASIC_INTEGRITY', 'MEETS_STRONG_INTEGRITY']
+  var verdicts = ['MEETS_DEVICE_INTEGRITY', 'MEETS_BASIC_INTEGRITY', 'MEETS_STRONG_INTEGRITY']
+  var device = payload.deviceIntegrity
+  if (device !== null && typeof device === 'object' && !Array.isArray(device)) {
+    device.deviceRecognitionVerdict = verdicts
+    changed = true
+  } else if (Array.isArray(device) || (device === undefined && (payload.requestDetails !== undefined || payload.appIntegrity !== undefined))) {
+    payload.deviceIntegrity = { deviceRecognitionVerdict: verdicts }
     changed = true
   }
   if (payload.appIntegrity !== undefined && payload.appIntegrity.appRecognitionVerdict !== undefined) {
@@ -140,7 +148,7 @@ function rewriteVerdicts(s) {
   if (payload.ctsProfileMatch !== undefined) { payload.ctsProfileMatch = true; changed = true }
   if (payload.basicIntegrity !== undefined) { payload.basicIntegrity = true; changed = true }
   if (!changed) return s
-  return parts[0] + '.' + bytesToB64url(stringToBytes(JSON.stringify(payload))) + '.'
+  return parts[0] + '.' + bytesToB64url(stringToBytes(JSON.stringify(payload))) + '.' + parts[2]
 }
 
 function hookStringResults(clsName) {
@@ -197,26 +205,78 @@ function hookNative() {
     sgTry('native ' + fname, function () {
       var p = globalExport(fname)
       if (p === null) throw new Error('symbol not found')
-      var ok = new NativeCallback(function (ssl, alert) { return 0 }, 'int', ['pointer', 'pointer'])
+      var ok = pin(new NativeCallback(function (ssl, alert) { return 0 }, 'int', ['pointer', 'pointer']))
       Interceptor.attach(p, { onEnter: function (args) { args[2] = ok } })
     })
   })
   sgTry('native SSL_get_verify_result', function () {
     var p = globalExport('SSL_get_verify_result')
     if (p === null) throw new Error('symbol not found')
-    Interceptor.replace(p, new NativeCallback(function () { return 0 }, 'long', ['pointer']))
+    Interceptor.replace(p, pin(new NativeCallback(function () { return 0 }, 'long', ['pointer'])))
   })
+  // strstr runs on every C string search and re-enters JS on the app thread. Only scrub maps and status reads.
   sgTry('native maps scan filter', function () {
-    var p = globalExport('strstr')
-    if (p === null) throw new Error('symbol not found')
-    var orig = new NativeFunction(p, 'pointer', ['pointer', 'pointer'])
-    Interceptor.replace(p, new NativeCallback(function (hay, needle) {
-      try {
-        var n = needle.readCString()
-        if (n !== null && /frida|xposed|magisk|zygisk|linjector|gadget/i.test(n)) return ptr(0)
-      } catch (e) {}
-      return orig(hay, needle)
-    }, 'pointer', ['pointer', 'pointer']))
+    var readFn = globalExport('read')
+    if (readFn === null) throw new Error('symbol not found')
+    var watched = {}
+    function attachOpen(name, pathArg) {
+      var exp = globalExport(name)
+      if (exp === null) return
+      var listener = {
+        onEnter: function (args) {
+          this.hit = false
+          try {
+            var path = args[pathArg].readCString()
+            this.hit = path !== null && /\/proc\/self\/(maps|status)$/.test(path)
+          } catch (e) {}
+        },
+        onLeave: function (ret) {
+          var fd = ret.toInt32()
+          if (this.hit && fd >= 0) watched[fd] = true
+        },
+      }
+      pin(listener)
+      Interceptor.attach(exp, listener)
+    }
+    attachOpen('open', 0)
+    attachOpen('openat', 1)
+    var closeFn = globalExport('close')
+    if (closeFn !== null) {
+      var closeListener = {
+        onEnter: function (args) { this.fd = args[0].toInt32() },
+        onLeave: function (ret) { if (ret.toInt32() === 0) delete watched[this.fd] },
+      }
+      pin(closeListener)
+      Interceptor.attach(closeFn, closeListener)
+    }
+    var readListener = {
+      onEnter: function (args) {
+        this.fd = args[0].toInt32()
+        this.buf = args[1]
+      },
+      onLeave: function (ret) {
+        var n = ret.toInt32()
+        if (n <= 0 || watched[this.fd] !== true) return
+        try {
+          var raw = this.buf.readByteArray(n)
+          if (raw === null) return
+          var bytes = new Uint8Array(raw)
+          var text = ''
+          for (var i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i])
+          var cleaned = text.replace(/frida|xposed|magisk|zygisk|linjector|gadget/ig, function (match) {
+            var blank = ''
+            for (var c = 0; c < match.length; c++) blank += ' '
+            return blank
+          })
+          if (cleaned === text || cleaned.length !== n) return
+          var out = []
+          for (var j = 0; j < n; j++) out.push(cleaned.charCodeAt(j) & 0xff)
+          this.buf.writeByteArray(out)
+        } catch (e) {}
+      },
+    }
+    pin(readListener)
+    Interceptor.attach(readFn, readListener)
   })
 }
 
@@ -283,29 +343,43 @@ if (Java.available) {
         deny(name)
         return this.getPackageInfo(name, flags)
       }
-      var filterSlice = function (slice) {
+      var PkgInfo = Java.use('android.content.pm.PackageInfo')
+      var AppInfo = Java.use('android.content.pm.ApplicationInfo')
+      function installedName(item) {
         try {
-          var f = slice.getClass().getDeclaredField('mList')
-          f.setAccessible(true)
-          var list = f.get(slice)
-          var out = Java.use('java.util.ArrayList').$new()
-          var it = list.iterator()
-          while (it.hasNext()) {
-            var item = it.next()
-            var pf = item.getClass().getDeclaredField('packageName')
-            pf.setAccessible(true)
-            if (HIDE_PKGS.indexOf(String(pf.get(item))) === -1) out.add(item)
-          }
-          f.set(slice, out)
+          var info = Java.cast(item, PkgInfo)
+          var name = info.packageName.value !== undefined ? info.packageName.value : info.packageName
+          return String(name)
         } catch (e) {}
-        return slice
+        try {
+          var app = Java.cast(item, AppInfo)
+          var appName = app.packageName.value !== undefined ? app.packageName.value : app.packageName
+          return String(appName)
+        } catch (e) {}
+        return ''
       }
-      PM.getInstalledPackages.overload('int').implementation = function (flags) {
-        return filterSlice(this.getInstalledPackages(flags))
+      function filterInstalled(list) {
+        if (list === null) return list
+        var out = Java.use('java.util.ArrayList').$new()
+        var it = list.iterator()
+        while (it.hasNext()) {
+          var item = it.next()
+          if (HIDE_PKGS.indexOf(installedName(item)) === -1) out.add(item)
+        }
+        return out
       }
-      PM.getInstalledApplications.overload('int').implementation = function (flags) {
-        return filterSlice(this.getInstalledApplications(flags))
+      function hookInstalled(method, sig) {
+        try {
+          PM[method].overload(sig).implementation = function (flags) {
+            var list = this[method](flags)
+            try { return filterInstalled(list) } catch (e) { return list }
+          }
+        } catch (e) {}
       }
+      hookInstalled('getInstalledPackages', 'int')
+      hookInstalled('getInstalledPackages', 'android.content.pm.PackageManager$PackageInfoFlags')
+      hookInstalled('getInstalledApplications', 'int')
+      hookInstalled('getInstalledApplications', 'android.content.pm.PackageManager$ApplicationInfoFlags')
     })
 
     sgTry('Permissive TrustManager', function () {
@@ -334,13 +408,44 @@ if (Java.available) {
       }
     })
 
-    sgTry('TrustManagerImpl bypass', function () {
-      var TMI = Java.use('com.android.org.conscrypt.TrustManagerImpl')
-      var Arrays = Java.use('java.util.Arrays')
-      TMI.checkServerTrusted.overload('[Ljava.security.cert.X509Certificate;', 'java.lang.String').implementation = function (chain, authType) {}
-      TMI.checkServerTrusted.overload('[Ljava.security.cert.X509Certificate;', 'java.lang.String', 'java.net.Socket').implementation = function (chain, authType, conn) { return Arrays.asList(chain) }
-      TMI.checkServerTrusted.overload('[Ljava.security.cert.X509Certificate;', 'java.lang.String', 'javax.net.ssl.SSLEngine').implementation = function (chain, authType, conn) { return Arrays.asList(chain) }
-      TMI.checkServerTrusted.overload('[Ljava.security.cert.X509Certificate;', 'java.lang.String', 'java.lang.String').implementation = function (chain, authType, host) { return Arrays.asList(chain) }
+    function peerList(chain) {
+      if (chain === null) return Java.use('java.util.ArrayList').$new()
+      return Java.use('java.util.Arrays').asList(chain)
+    }
+    function overload(method, sig) {
+      if (sig.length === 2) return method.overload(sig[0], sig[1])
+      return method.overload(sig[0], sig[1], sig[2])
+    }
+    function voidServer(className, sig) {
+      sgTry(className + ' void ' + sig.join(','), function () {
+        overload(Java.use(className).checkServerTrusted, sig).implementation = function () {}
+      })
+    }
+    function listServer(className, sig) {
+      sgTry(className + ' list ' + sig.join(','), function () {
+        overload(Java.use(className).checkServerTrusted, sig).implementation = function (chain) { return peerList(chain) }
+      })
+    }
+    var CERTS = '[Ljava.security.cert.X509Certificate;'
+    var STR = 'java.lang.String'
+    var SOCKET = 'java.net.Socket'
+    var ENGINE = 'javax.net.ssl.SSLEngine'
+    ;['com.android.org.conscrypt.TrustManagerImpl', 'android.security.net.config.NetworkSecurityTrustManager', 'android.security.net.config.RootTrustManager'].forEach(function (className) {
+      voidServer(className, [CERTS, STR])
+      voidServer(className, [CERTS, STR, SOCKET])
+      voidServer(className, [CERTS, STR, ENGINE])
+      listServer(className, [CERTS, STR, STR])
+    })
+    function trustedChain(sig) {
+      sgTry('getTrustedChainForServer ' + sig.join(','), function () {
+        var method = Java.use('com.android.org.conscrypt.TrustManagerImpl').getTrustedChainForServer
+        overload(method, sig).implementation = function (chain) { return peerList(chain) }
+      })
+    }
+    trustedChain([CERTS, STR, SOCKET])
+    trustedChain([CERTS, STR, ENGINE])
+    sgTry('NetworkSecurityTrustManager checkPins', function () {
+      Java.use('android.security.net.config.NetworkSecurityTrustManager').checkPins.overload('java.util.List').implementation = function () {}
     })
 
     sgTry('X509TrustManagerExtensions bypass', function () {

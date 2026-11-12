@@ -15,22 +15,30 @@ export interface Refusal {
   sample: string
 }
 
+// Crash is first so a fatal line in the same batch outranks a weaker integrity mention.
+// Success tokens (MEETS_*_INTEGRITY, a bare "frida") are not refusals.
 const PATTERNS: Array<[RefusalKind, RegExp]> = [
+  ['crash', /FATAL EXCEPTION|SIGSEGV|SIGABRT|SIGBUS|beginning of crash/i],
   [
     'integrity',
-    /play integrity|droidguard|integrity api|integrity verdict|integrityverdict|meets_(basic|device|strong)_integrity|not certified|play protect/i,
+    /UNEVALUATED|integrity check failed|integrity verification failed|device integrity (?:is )?(?:missing|empty|failed)|verdict (?:is )?(?:missing|empty|failed)|no device integrity|not certified/i,
   ],
-  ['root', /rootbeer|rooted (device|phone)|device is rooted|root detect|isRooted|superuser|magisk/i],
-  ['emulator', /emulator detect|detected emulator|running (on|in) an? emulator|isEmulator|qemu detect/i],
-  ['frida', /frida|objection|gadget inject/i],
-  ['crash', /FATAL EXCEPTION|SIGSEGV|SIGABRT|SIGBUS|beginning of crash/i],
+  [
+    'root',
+    /rooted (?:device|phone)|device is rooted|root detected|(?:^|\W)isRooted(?:\(\))?\s*[:=]?\s*true|su binary (?:was )?found|magisk (?:was )?(?:found|detected)/i,
+  ],
+  [
+    'emulator',
+    /emulator detect|detected emulator|running (?:on|in) an? emulator|(?:^|\W)isEmulator(?:\(\))?\s*[:=]?\s*true|qemu detect/i,
+  ],
+  ['frida', /\bobjection\b|gadget inject|frida(?:-server)? (?:was )?(?:detected|found|injected)/i],
 ]
 
-/** First refusal reason found in a batch of logcat lines from the launched app. */
+/** Highest-priority refusal in this batch. A crash outranks an earlier integrity line. */
 export function classifyRefusal(lines: LogLine[], pkg: string, pid: number | null): Refusal | null {
-  for (const line of lines) {
-    if (pid !== null && line.pid !== pid) continue
-    for (const [kind, pattern] of PATTERNS) {
+  const scoped = pid === null ? lines : lines.filter((line) => line.pid === pid)
+  for (const [kind, pattern] of PATTERNS) {
+    for (const line of scoped) {
       if (pattern.test(line.message) || pattern.test(line.tag)) {
         return {
           pkg,
