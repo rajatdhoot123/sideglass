@@ -50,8 +50,6 @@ function smaliFiles(dir: string, out: string[] = []): string[] {
   return out
 }
 
-const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-
 /**
  * Apps often have their provider authorities written into the code as well as the manifest
  * (for example a ContentProvider that checks its authority starts with the package name).
@@ -60,6 +58,19 @@ const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
  * Returns the rebuilt dex files by entry name, or null when the code has none of the names.
  * Class names are untouched: they use slashes in dex (Lcom/example/Foo;), the names here use dots.
  */
+
+/** Replace whole smali string literals. A short name must not match inside a longer one. */
+export function replaceSmaliStrings(text: string, renames: Map<string, string>): { text: string; count: number } {
+  let count = 0
+  const updated = text.replace(/"((?:\\.|[^"\\])*)"/g, (quoted, body: string) => {
+    const next = renames.get(body)
+    if (next === undefined || next === body) return quoted
+    count++
+    return `"${next.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+  })
+  return { text: updated, count }
+}
+
 export async function renameInCode(
   apk: string,
   renames: Map<string, string>,
@@ -82,12 +93,10 @@ export async function renameInCode(
   log('Renaming the same names inside the app code (this can take a minute)…')
   // -r: code only. Resources and the manifest stay as they are; only the dex files are used.
   await run(java, ['-jar', jar, 'd', '-r', '--no-assets', '-f', '-o', dir, apk], { timeout: 900_000, maxBuffer: 64 * 1024 * 1024 })
-  const pattern = new RegExp(olds.map(escape).join('|'), 'g')
   let changed = 0
   for (const file of smaliFiles(dir)) {
     const text = readFileSync(file, 'utf8')
-    let count = 0
-    const updated = text.replace(pattern, (old) => (count++, renames.get(old)!))
+    const { text: updated, count } = replaceSmaliStrings(text, renames)
     if (count) {
       writeFileSync(file, updated)
       changed += count

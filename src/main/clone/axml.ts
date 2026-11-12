@@ -16,6 +16,7 @@ const SORTED_FLAG = 0x1
 const NO_INDEX = 0xffffffff
 const TYPE_REFERENCE = 0x01
 const TYPE_STRING = 0x03
+const TYPE_DYNAMIC_REFERENCE = 0x07
 
 /** android:* attributes we touch, by resource id (names can be stripped by obfuscators). */
 const ATTR_IDS: Record<number, string> = {
@@ -164,6 +165,35 @@ function writePool(pool: Pool, strings: string[]): Buffer {
   return Buffer.concat([header, offsets, pool.styleOffsets, stringData, pool.styles])
 }
 
+/** A string-pool chunk. The resource table's global pool uses the same layout. */
+export function stringPoolChunk(strings: string[], utf8 = true): Buffer {
+  return writePool(
+    { strings, utf8, flags: utf8 ? UTF8_FLAG : 0, styleCount: 0, styleOffsets: Buffer.alloc(0), styles: Buffer.alloc(0), end: 0 },
+    strings,
+  )
+}
+
+/** Strings in a string-pool chunk, in index order. */
+export function poolStrings(chunk: Buffer): string[] {
+  return readPool(chunk, 0).strings
+}
+
+/** Replace strings by index. Indexes stay valid, so resource entries that point at them do too. */
+export function replacePoolStrings(chunk: Buffer, byIndex: Map<number, string>): Buffer | null {
+  if (!byIndex.size) return null
+  const pool = readPool(chunk, 0)
+  const strings = pool.strings.slice()
+  let changed = false
+  for (const [index, value] of byIndex) {
+    if (index < 0 || index >= strings.length) throw new Error(`String pool has no index ${index}`)
+    if (strings[index] !== value) {
+      strings[index] = value
+      changed = true
+    }
+  }
+  return changed ? writePool(pool, strings) : null
+}
+
 function parse(buf: Buffer): Doc {
   if (buf.readUInt16LE(0) !== XML) throw new Error('Not a binary AndroidManifest.xml')
   const pool = readPool(buf, buf.readUInt16LE(2))
@@ -194,8 +224,13 @@ function parse(buf: Buffer): Doc {
         const data = buf.readUInt32LE(offset + 16)
         const id = resourceIds[nameIndex]
         const name = (id !== undefined ? ATTR_IDS[id] : undefined) ?? str(nameIndex) ?? ''
-        const value = raw !== NO_INDEX ? str(raw) : dataType === TYPE_STRING ? str(data) : null
-        attrs.push({ offset, name, value, ref: dataType === TYPE_REFERENCE ? data : null })
+        // aapt1 and `--keep-raw-values` store the source "@string/name" in rawValue while the
+        // typed value is the resource id. Treating that text as the authority renames it to
+        // "com.fresh.@string/name" and never asks the resource table for the real string.
+        const ref = dataType === TYPE_REFERENCE || dataType === TYPE_DYNAMIC_REFERENCE ? data : null
+        const rawText = raw !== NO_INDEX ? str(raw) : null
+        const value = ref !== null ? null : rawText !== null ? rawText : dataType === TYPE_STRING ? str(data) : null
+        attrs.push({ offset, name, value, ref })
       }
       elements.push({ name: str(buf.readUInt32LE(ext + 4)) ?? '', parent: stack.at(-1) ?? -1, attrs })
       stack.push(elements.length - 1)
@@ -239,6 +274,11 @@ export interface PatchResult {
    * the old names written in must be changed the same way, or it disagrees with the manifest.
    */
   renames: Map<string, string>
+  /**
+   * String resources the manifest referenced, resource id to the new text. The pool in
+   * resources.arsc still has the old text until those entries are rewritten.
+   */
+  resources: Map<number, string>
 }
 
 /** Rename the package (and its authorities and permissions) and, optionally, the label. */
@@ -264,6 +304,13 @@ export function patchManifest(input: Buffer, edit: ManifestEdit): PatchResult {
     out[attr.offset + 14] = 0
     out[attr.offset + 15] = TYPE_STRING
     out.writeUInt32LE(i, attr.offset + 16)
+  }
+  // A referenced string is written into the manifest and recorded so resources.arsc can
+  // change the same text. getString() and the manifest then agree.
+  const resources = new Map<number, string>()
+  const apply = (attr: Attr, value: string) => {
+    if (attr.ref !== null) resources.set(attr.ref, value)
+    set(attr, value)
   }
 
   const manifest = doc.elements.find((e) => e.name === 'manifest')
@@ -304,12 +351,15 @@ export function patchManifest(input: Buffer, edit: ManifestEdit): PatchResult {
     for (const attr of el.attrs) {
       const value = attr.value ?? (attr.ref !== null && attr.name !== 'label' ? (edit.resolve?.(attr.ref) ?? null) : null)
       if (el === manifest && attr === pkgAttr) set(attr, newPkg)
-      else if (el === manifest && attr.name === 'sharedUserId' && value) set(attr, own(value))
+      else if (el === manifest && attr.name === 'sharedUserId' && value) apply(attr, own(value))
       else if (COMPONENTS.has(el.name) && CLASS_ATTRS.has(attr.name) && value) set(attr, absolute(value))
-      else if (el.name === 'provider' && attr.name === 'authorities' && value) set(attr, value.split(';').map(own).join(';'))
-      else if (PERMISSION_DECLS.has(el.name) && attr.name === 'name' && value) set(attr, permissions.get(value)!)
+      else if (el.name === 'provider' && attr.name === 'authorities' && value) {
+        const renamed = value.split(';').map((part) => own(part)).join(';')
+        if (renamed !== value) renames.set(value, renamed)
+        apply(attr, renamed)
+      } else if (PERMISSION_DECLS.has(el.name) && attr.name === 'name' && value) apply(attr, permissions.get(value)!)
       else if ((PERMISSION_REFS.has(attr.name) || (USES_PERMISSION.has(el.name) && attr.name === 'name')) && value && permissions.has(value)) {
-        set(attr, permissions.get(value)!)
+        apply(attr, permissions.get(value)!)
       } else if (
         edit.label !== undefined &&
         attr.name === 'label' &&
@@ -325,5 +375,5 @@ export function patchManifest(input: Buffer, edit: ManifestEdit): PatchResult {
   const rest = out.subarray(doc.pool.end)
   const header = Buffer.from(out.subarray(0, out.readUInt16LE(2)))
   header.writeUInt32LE(header.length + pool.length + rest.length, 4)
-  return { manifest: Buffer.concat([header, pool, rest]), oldPkg, labels, renames }
+  return { manifest: Buffer.concat([header, pool, rest]), oldPkg, labels, renames, resources }
 }

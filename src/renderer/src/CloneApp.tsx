@@ -28,7 +28,7 @@ export function CloneApp({
     setLog([])
     setProblem(null)
     try {
-      const result = await window.api.cloneApp({ pkg, newPkg: target, label: label.trim() || undefined })
+      const result = await window.api.cloneApp({ pkg, newPkg: target, label: label.trim() || undefined, open })
       if (result.warning) {
         // Keep the dialog open: the user needs to read why the clone does not run.
         setProblem({ title: `“${result.label}” is installed, but it does not run as a clone`, text: result.warning })

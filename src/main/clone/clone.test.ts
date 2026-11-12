@@ -1,11 +1,15 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
-import { manifestValues, patchManifest } from './axml'
+import { manifestValues, patchManifest, poolStrings, stringPoolChunk } from './axml'
 import { readEntry, repack } from './zip'
+import { renameResourcePackage, renameResourceStrings } from './arsc'
+import { replaceSmaliStrings } from './code'
+import { crashLogMentionsPackage } from './explain'
+import { zipalignLacksPageFlag } from './index'
 
 const ANDROID = 'http://schemas.android.com/apk/res/android'
 const ids: Record<string, number> = { label: 0x01010001, name: 0x01010003, authorities: 0x01010018, permission: 0x01010006 }
-type Value = string | { ref: number }
+type Value = string | { ref: number; raw?: string }
 type Node = [string, Record<string, Value>, Node[]]
 
 /** A small binary manifest, laid out the way aapt2 writes one (UTF-8 pool, resource map first). */
@@ -27,7 +31,8 @@ function axml(root: Node): Buffer {
       a.writeUInt32LE(k === 'package' ? 0xffffffff : at(ANDROID), 0)
       a.writeUInt32LE(at(k), 4)
       const str = typeof v === 'string'
-      a.writeUInt32LE(str ? at(v) : 0xffffffff, 8)
+      const raw = str ? v : v.raw
+      a.writeUInt32LE(raw ? at(raw) : 0xffffffff, 8)
       a.writeUInt16LE(8, 12)
       a[15] = str ? 3 : 1
       a.writeUInt32LE(str ? at(v) : v.ref, 16)
@@ -106,6 +111,43 @@ test('patchManifest renames the package, its names, and the launcher label', () 
   assert.equal(el('provider', 1).authorities, 'com.fresh.ref')
   assert.equal(out.renames.get('com.old.files'), 'com.fresh.files')
   assert.equal(out.renames.get('com.old.PERM'), 'com.fresh.PERM')
+  assert.equal(out.resources.get(0x7f020002), 'com.fresh.ref')
+})
+
+test('patchManifest resolves a raw @string reference instead of renaming that text', () => {
+  const bin = axml([
+    'manifest',
+    { package: 'com.old' },
+    [
+      ['permission', { name: { ref: 0x7f010010, raw: '@string/perm' } }, []],
+      ['uses-permission', { name: 'com.old.PERM' }, []],
+      ['uses-permission', { name: { ref: 0x7f010010, raw: '@string/perm' } }, []],
+      [
+        'application',
+        {},
+        [
+          ['provider', { name: 'P', authorities: { ref: 0x7f010011, raw: '@string/auth' } }, []],
+          ['provider', { name: 'Q', authorities: 'com.facebook.app.P1' }, []],
+        ],
+      ],
+    ],
+  ])
+  const out = patchManifest(bin, {
+    pkg: 'com.fresh',
+    resolve: (id) => (id === 0x7f010010 ? 'com.old.PERM' : id === 0x7f010011 ? 'com.old.auth' : null),
+  })
+  const v = manifestValues(out.manifest)
+  const el = (name: string, i = 0) => v.filter((e) => e.element === name)[i].attrs
+  assert.equal(el('permission').name, 'com.fresh.PERM')
+  assert.equal(el('uses-permission').name, 'com.fresh.PERM')
+  assert.equal(el('uses-permission', 1).name, 'com.fresh.PERM')
+  assert.equal(el('provider').authorities, 'com.fresh.auth')
+  assert.equal(el('provider', 1).authorities, 'com.fresh.com.facebook.app.P1')
+  assert.equal(out.resources.get(0x7f010010), 'com.fresh.PERM')
+  assert.equal(out.resources.get(0x7f010011), 'com.fresh.auth')
+  assert.equal(out.renames.has('@string/perm'), false)
+  assert.equal(out.renames.has('@string/auth'), false)
+  assert.equal(out.renames.get('com.facebook.app.P1'), 'com.fresh.com.facebook.app.P1')
 })
 
 test('repack replaces one entry, keeps the rest, and drops the old signature', () => {
@@ -148,8 +190,7 @@ test('repack replaces one entry, keeps the rest, and drops the old signature', (
   assert.equal(readEntry(out, 'META-INF/CERT.RSA'), null)
 })
 
-test('renameResourcePackage renames the app package in the resource table only', async () => {
-  const { renameResourcePackage } = await import('./arsc')
+test('renameResourcePackage renames the app package in the resource table only', () => {
   const pkgChunk = (id: number, name: string) => {
     const c = Buffer.alloc(288)
     c.writeUInt16LE(0x0200, 0)
@@ -171,6 +212,163 @@ test('renameResourcePackage renames the app package in the resource table only',
   assert.equal(name(12 + 288), 'com.lib')
   assert.equal(out.length, arsc.length)
   assert.equal(renameResourcePackage(arsc, 'com.other', 'com.fresh'), null)
+})
+
+function simpleEntry(key: number, poolIndex: number): Buffer {
+  const entry = Buffer.alloc(16)
+  entry.writeUInt16LE(8, 0)
+  entry.writeUInt16LE(0, 2)
+  entry.writeUInt32LE(key, 4)
+  entry.writeUInt16LE(8, 8)
+  entry[11] = 3
+  entry.writeUInt32LE(poolIndex, 12)
+  return entry
+}
+
+function compactEntry(key: number, poolIndex: number): Buffer {
+  const entry = Buffer.alloc(8)
+  entry.writeUInt16LE(key, 0)
+  entry.writeUInt16LE(0x0008 | (0x03 << 8), 2)
+  entry.writeUInt32LE(poolIndex, 4)
+  return entry
+}
+
+/** A type chunk. [flags] 0 is dense uint32 offsets, 2 is uint16 offsets stored as offset/4. */
+function typeChunk(id: number, flags: number, entries: (Buffer | null)[]): Buffer {
+  const offsetBytes = flags & 0x02 ? 2 : 4
+  const offsets = Buffer.alloc(entries.length * offsetBytes)
+  const bodies: Buffer[] = []
+  let rel = 0
+  entries.forEach((entry, i) => {
+    if (!entry) {
+      if (offsetBytes === 2) offsets.writeUInt16LE(0xffff, i * 2)
+      else offsets.writeUInt32LE(0xffffffff, i * 4)
+      return
+    }
+    if (offsetBytes === 2) offsets.writeUInt16LE(rel / 4, i * 2)
+    else offsets.writeUInt32LE(rel, i * 4)
+    bodies.push(entry)
+    rel += entry.length
+  })
+  const headerSize = 24
+  const entriesStart = headerSize + offsets.length
+  const rest = Buffer.alloc(headerSize - 8)
+  rest[0] = id
+  rest[1] = flags
+  rest.writeUInt32LE(entries.length, 4)
+  rest.writeUInt32LE(entriesStart, 8)
+  rest.writeUInt32LE(4, 12)
+  const payload = Buffer.concat([rest, offsets, ...bodies])
+  const head = Buffer.alloc(8)
+  head.writeUInt16LE(0x0201, 0)
+  head.writeUInt16LE(headerSize, 2)
+  head.writeUInt32LE(8 + payload.length, 4)
+  return Buffer.concat([head, payload])
+}
+
+function sparseType(id: number, entryId: number, entry: Buffer): Buffer {
+  const offsets = Buffer.alloc(4)
+  offsets.writeUInt16LE(entryId, 0)
+  offsets.writeUInt16LE(0, 2)
+  const headerSize = 24
+  const entriesStart = headerSize + offsets.length
+  const rest = Buffer.alloc(headerSize - 8)
+  rest[0] = id
+  rest[1] = 0x01
+  rest.writeUInt32LE(1, 4)
+  rest.writeUInt32LE(entriesStart, 8)
+  rest.writeUInt32LE(4, 12)
+  const payload = Buffer.concat([rest, offsets, entry])
+  const head = Buffer.alloc(8)
+  head.writeUInt16LE(0x0201, 0)
+  head.writeUInt16LE(headerSize, 2)
+  head.writeUInt32LE(8 + payload.length, 4)
+  return Buffer.concat([head, payload])
+}
+
+function resourceTable(pool: Buffer, inner: Buffer, name = 'com.old'): Buffer {
+  const pkg = Buffer.alloc(288 + inner.length)
+  pkg.writeUInt16LE(0x0200, 0)
+  pkg.writeUInt16LE(288, 2)
+  pkg.writeUInt32LE(pkg.length, 4)
+  pkg.writeUInt32LE(0x7f, 8)
+  pkg.write(name, 12, 'utf16le')
+  inner.copy(pkg, 288)
+  const head = Buffer.alloc(12)
+  head.writeUInt16LE(0x0002, 0)
+  head.writeUInt16LE(12, 2)
+  head.writeUInt32LE(12 + pool.length + pkg.length, 4)
+  head.writeUInt32LE(1, 8)
+  return Buffer.concat([head, pool, pkg])
+}
+
+function globalPool(arsc: Buffer): Buffer {
+  const start = arsc.readUInt16LE(2)
+  return arsc.subarray(start, start + arsc.readUInt32LE(start + 4))
+}
+
+test('renameResourceStrings updates referenced strings and leaves the rest of the pool', () => {
+  const strings = ['Hello', 'com.old.auth.extra', 'com.old.auth', 'com.facebook.app.P1', 'com.old.PERM']
+  for (const utf8 of [true, false]) {
+    const pool = stringPoolChunk(strings, utf8)
+    const inner = Buffer.concat([
+      typeChunk(1, 0, [simpleEntry(0, 2), simpleEntry(1, 1), null]),
+      typeChunk(2, 0x02, [simpleEntry(0, 3)]),
+      typeChunk(3, 0, [compactEntry(0, 4)]),
+      sparseType(4, 5, simpleEntry(5, 2)),
+    ])
+    const arsc = resourceTable(pool, inner)
+    const out = renameResourceStrings(
+      arsc,
+      new Map<number, string>([
+        [0x7f010000, 'com.fresh.auth'],
+        [0x7f020000, 'com.fresh.com.facebook.app.P1'],
+        [0x7f030000, 'com.fresh.PERM'],
+        [0x7f040005, 'com.fresh.auth'],
+      ]),
+    )!
+    assert.deepEqual(poolStrings(globalPool(out)), [
+      'Hello',
+      'com.old.auth.extra',
+      'com.fresh.auth',
+      'com.fresh.com.facebook.app.P1',
+      'com.fresh.PERM',
+    ])
+    const renamed = renameResourcePackage(out, 'com.old', 'com.fresh')!
+    // The package chunk follows the resized string pool.
+    const pkgAt = renamed.readUInt16LE(2) + renamed.readUInt32LE(renamed.readUInt16LE(2) + 4)
+    assert.equal(renamed.readUInt16LE(pkgAt), 0x0200)
+    assert.equal(renamed.toString('utf16le', pkgAt + 12, pkgAt + 12 + 32).split('\0')[0], 'com.fresh')
+    assert.equal(renameResourceStrings(arsc, new Map([[0x7f0100ff, 'nope']])), null)
+  }
+})
+
+test('replaceSmaliStrings renames whole literals only', () => {
+  const renames = new Map([
+    ['com.facebook.app.P1', 'com.fresh.com.facebook.app.P1'],
+    ['downloads', 'com.fresh.downloads'],
+  ])
+  const { text, count } = replaceSmaliStrings(
+    ['const-string v0, "com.facebook.app.P1"', 'const-string v1, "com.facebook.app.P1.extra"', 'const-string v2, "downloads"', 'const-string v3, "mydownloads"'].join('\n'),
+    renames,
+  )
+  assert.equal(count, 2)
+  assert.match(text, /"com\.fresh\.com\.facebook\.app\.P1"/)
+  assert.match(text, /"com\.facebook\.app\.P1\.extra"/)
+  assert.match(text, /"com\.fresh\.downloads"/)
+  assert.match(text, /"mydownloads"/)
+})
+
+test('crash log lines match the package and not a longer name', () => {
+  assert.equal(crashLogMentionsPackage('Process: com.foo, PID: 3', 'com.foo'), true)
+  assert.equal(crashLogMentionsPackage('Process: com.foo.bar, PID: 3', 'com.foo'), false)
+  assert.equal(crashLogMentionsPackage('Process: com.foo.bar, PID: 3', 'com.foo.bar'), true)
+})
+
+test('zipalign falls back only when the page-size flag is unknown', () => {
+  assert.equal(zipalignLacksPageFlag('ERROR: unknown flag -P'), true)
+  assert.equal(zipalignLacksPageFlag('zipalign: illegal option -- P'), true)
+  assert.equal(zipalignLacksPageFlag("Unable to open 'app.apk' as zip archive"), false)
 })
 
 test('explainInstallError names the limitation behind adb install failures', async () => {

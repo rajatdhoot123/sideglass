@@ -9,13 +9,34 @@ import type { Adb } from '../adb'
 import type { Sdk } from '../sdk'
 import { installApks, isPackageName, pullApp } from '../store/apk'
 import { patchManifest } from './axml'
-import { renameResourcePackage } from './arsc'
+import { renameResourcePackage, renameResourceStrings } from './arsc'
 import { checkClone, explainInstallError } from './explain'
 import { renameInCode } from './code'
 import { readEntry, repack } from './zip'
 
 const run = promisify(execFile)
 const BUILD_TOOLS = 'build-tools;35.0.0'
+
+function commandText(error: unknown): string {
+  const err = error as Error & { stderr?: string | Buffer }
+  const stderr = Buffer.isBuffer(err.stderr) ? err.stderr.toString() : (err.stderr ?? '')
+  return `${stderr}\n${err.message ?? ''}`
+}
+
+/** -P is 16 KB pages. Only an old zipalign that does not know the flag may fall back to 4 KB. */
+export function zipalignLacksPageFlag(text: string): boolean {
+  return /unknown flag|illegal option|unrecognized option|invalid option/i.test(text)
+}
+
+async function alignApk(tools: BuildTools, unsigned: string, aligned: string): Promise<void> {
+  try {
+    await run(tools.zipalign, ['-f', '-P', '16', '4', unsigned, aligned])
+  } catch (error) {
+    const text = commandText(error)
+    if (!zipalignLacksPageFlag(text)) throw new Error(`Aligning the clone failed: ${text.trim().split('\n').filter(Boolean).pop()}`)
+    await run(tools.zipalign, ['-f', '-p', '4', unsigned, aligned])
+  }
+}
 
 interface BuildTools {
   aapt2: string
@@ -49,10 +70,31 @@ async function buildTools(sdk: Sdk, log: (l: string) => void): Promise<BuildTool
     const child = spawn(sdk.sdkmanager, ['--install', BUILD_TOOLS], {
       env: { ...process.env, ANDROID_HOME: sdk.root, ANDROID_SDK_ROOT: sdk.root },
     })
+    let settled = false
+    let timer: ReturnType<typeof setTimeout>
+    const finish = (error?: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (error) reject(error)
+      else resolve()
+    }
+    // sdkmanager writes license text and progress until the pipe fills. Leaving stdout
+    // unread deadlocks the child, and the UI stays on "Cloning…".
+    timer = setTimeout(() => {
+      child.kill()
+      finish(new Error(`Installing ${BUILD_TOOLS} timed out`))
+    }, 5 * 60 * 1000)
+    const logChunk = (d: Buffer) => {
+      const line = d.toString().trim()
+      if (line) log(line)
+    }
+    child.stdout.on('data', logChunk)
+    child.stderr.on('data', logChunk)
     child.stdin.write('y\n'.repeat(10))
     child.stdin.end()
-    child.on('error', reject)
-    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`sdkmanager exited ${code}`))))
+    child.on('error', (error) => finish(error))
+    child.on('exit', (code) => finish(code === 0 ? undefined : new Error(`sdkmanager exited ${code}`)))
   })
   const installed = findBuildTools(sdk)
   if (!installed) throw new Error(`${BUILD_TOOLS} did not install`)
@@ -120,6 +162,8 @@ export interface CloneOptions {
   newPkg: string
   /** The copy's name in the launcher; empty means "<name> (clone)". */
   label?: string
+  /** Leave the clone in front after the start check. Defaults to true. */
+  open?: boolean
 }
 
 export interface CloneResult {
@@ -153,8 +197,8 @@ export async function cloneApp(adb: Adb, sdk: Sdk, dataDir: string, options: Clo
   rmSync(out, { recursive: true, force: true })
   mkdirSync(out, { recursive: true })
   const signed: string[] = []
-  // Names renamed in the manifest, to rename in the code as well. Only names that contain the
-  // package: a short generic one (say "downloads") could match unrelated strings in the code.
+  // Authorities, permissions and shared user ids renamed in the manifest. The dex pass matches
+  // them as whole string literals, so a short name cannot change part of a longer one.
   const renames = new Map<string, string>()
   // The base APK declares the providers, so it goes first; splits with code then use its names.
   for (const apk of [base, ...pulled.filter((p) => p !== base)]) {
@@ -165,10 +209,15 @@ export async function cloneApp(adb: Adb, sdk: Sdk, dataDir: string, options: Clo
     if (!manifest) throw new Error(`${name} has no AndroidManifest.xml`)
     const patched = patchManifest(manifest, { pkg: newPkg, label: apk === base ? label : undefined, resolve: (id) => strings.get(id) ?? null })
     if (patched.oldPkg !== pkg) throw new Error(`${name} belongs to ${patched.oldPkg}, not ${pkg}`)
-    for (const [from, to] of patched.renames) if (from.includes(pkg)) renames.set(from, to)
+    for (const [from, to] of patched.renames) renames.set(from, to)
     const replace = new Map([['AndroidManifest.xml', patched.manifest]])
     const arsc = readEntry(zip, 'resources.arsc')
-    const table = arsc && renameResourcePackage(arsc, pkg, newPkg)
+    let table = arsc ? renameResourcePackage(arsc, pkg, newPkg) : null
+    // Resource ids belong to this APK's table. A split does not share the base APK's pool.
+    if (arsc && patched.resources.size) {
+      const rewritten = renameResourceStrings(table ?? arsc, patched.resources)
+      if (rewritten) table = rewritten
+    }
     if (table) replace.set('resources.arsc', table)
     try {
       const code = await renameInCode(apk, renames, out, join(dataDir, 'tools'), log)
@@ -188,8 +237,7 @@ export async function cloneApp(adb: Adb, sdk: Sdk, dataDir: string, options: Clo
     const aligned = join(out, `aligned-${name}`)
     const final = join(out, name)
     writeFileSync(unsigned, repack(zip, replace))
-    // -P 16: 16 KB alignment for uncompressed native libraries, which also satisfies 4 KB pages.
-    await run(tools.zipalign, ['-f', '-P', '16', '4', unsigned, aligned]).catch(() => run(tools.zipalign, ['-f', '-p', '4', unsigned, aligned]))
+    await alignApk(tools, unsigned, aligned)
     await run(tools.apksigner, ['sign', '--key', key.key, '--cert', key.cert, '--out', final, aligned], { timeout: 300_000 }).catch(
       (error: Error & { stderr?: string }) => {
         const text = `${error.stderr ?? ''} ${error.message}`
@@ -212,7 +260,7 @@ export async function cloneApp(adb: Adb, sdk: Sdk, dataDir: string, options: Clo
   })
   log(`${newPkg}: ${install}`)
   log('Starting the clone once to check it runs…')
-  const warning = (await checkClone(adb, newPkg)) ?? undefined
+  const warning = (await checkClone(adb, newPkg, options.open !== false)) ?? undefined
   log(warning ? `${newPkg} is installed but does not run: ${warning.split('\n')[0]}` : `${newPkg} runs.`)
   return { pkg: newPkg, label, install, warning }
 }

@@ -30,11 +30,20 @@ function explainCrash(cause: string): string {
   return hit ? hit[1] : 'The app crashed on start. It probably checks something only the original has (its package name, signature or install source).'
 }
 
+/** Logcat writes "Process: com.example.app, PID: …". A longer name such as com.example.app.debug is not this package. */
+export function crashLogMentionsPackage(log: string, pkg: string): boolean {
+  const escaped = pkg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const line = new RegExp(`Process: ${escaped}(?![\\w.])`)
+  return log.split('\n').some((entry) => line.test(entry))
+}
+
 /**
  * Start the clone once and watch it for a few seconds. Returns null when it keeps running,
  * otherwise what went wrong and the limitation behind it.
+ * When [open] is false, a clone that stays up is closed again: the check has to start it,
+ * but the user asked for it not to be left in front.
  */
-export async function checkClone(adb: Adb, pkg: string): Promise<string | null> {
+export async function checkClone(adb: Adb, pkg: string, open = true): Promise<string | null> {
   const resolved = await adb
     .shell(`cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER ${pkg}`)
     .catch(() => '')
@@ -46,7 +55,7 @@ export async function checkClone(adb: Adb, pkg: string): Promise<string | null> 
     await new Promise((r) => setTimeout(r, 1000))
     const crash = await adb.shell('logcat -d -b crash').catch(() => '')
     const lines = crash.split('\n')
-    if (lines.some((l) => l.includes(`Process: ${pkg}`))) {
+    if (crashLogMentionsPackage(crash, pkg)) {
       const causes = lines.filter((l) => /Caused by:|FATAL EXCEPTION|Exception:/.test(l)).map((l) => l.replace(/^.*?AndroidRuntime:\s*/, '').trim())
       const cause = causes.filter((c) => c.startsWith('Caused by')).pop() ?? causes.find((c) => !c.startsWith('FATAL')) ?? ''
       await adb.shell(`am force-stop ${pkg}`).catch(() => undefined)
@@ -55,5 +64,6 @@ export async function checkClone(adb: Adb, pkg: string): Promise<string | null> 
   }
   const alive = (await adb.shell(`pidof ${pkg}`).catch(() => '')).trim()
   if (!alive) return 'The clone closed by itself right after starting. The app probably checks that it is the original (its signature or package name) and quits.'
+  if (!open) await adb.shell(`am force-stop ${pkg}`).catch(() => undefined)
   return null
 }
