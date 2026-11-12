@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Device, ExchangeSummary, LogLine, PhoneInput, Progress, Settings, TlsFailure } from '../../shared'
-import { PhoneChoice, SettingsDialog } from './PhoneChoice'
+import { DeviceSwitch, PhoneChoice, SettingsDialog } from './PhoneChoice'
 import { Phone } from './Phone'
 import { Requests } from './Requests'
 import { Logs } from './Logs'
@@ -135,6 +135,7 @@ export function App() {
             Storage
           </button>
           <div className="spacer" />
+          <DeviceSwitch current={settings} onSave={(s) => void choose(s)} />
           <button
             onClick={async () => {
               await window.api.clear()

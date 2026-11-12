@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { delimiter, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { Adb } from './adb'
 
 /** Host library and device server must be the same release. */
@@ -105,6 +105,7 @@ class FridaHost {
   constructor(
     private readonly root: string,
     private readonly log: (line: string) => void,
+    private readonly adbDir?: string,
   ) {}
 
   async ping(): Promise<void> {
@@ -154,10 +155,11 @@ class FridaHost {
     const node = process.env.SIDEGLASS_NODE || 'node'
     const script = join(this.root, 'scripts', 'frida-host.mjs')
     const nodePath = [join(this.root, 'node_modules'), process.env.NODE_PATH].filter(Boolean).join(delimiter)
+    const path = [this.adbDir, process.env.PATH].filter(Boolean).join(delimiter)
     const child = spawn(node, [script], {
       cwd: this.root,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, NODE_PATH: nodePath },
+      env: { ...process.env, NODE_PATH: nodePath, PATH: path },
     })
     this.child = child
     child.stdout?.setEncoding('utf8')
@@ -230,10 +232,14 @@ export class DeviceFrida {
     await this.adb.exec(['push', binary, SERVER_PATH], 120_000)
     await this.adb.shell(`chmod 755 ${SERVER_PATH}`)
     const running = (await this.adb.shell('pidof frida-server').catch(() => '')).trim()
-    if (!running) await this.launchServer()
+    if (running) {
+      // The process keeps the old binary after the file is replaced. Start the one just pushed.
+      await this.adb.shell(`kill ${running.split(/\s+/).filter((pid) => /^\d+$/.test(pid)).join(' ')}`).catch(() => undefined)
+    }
+    await this.launchServer()
     const version = (await this.adb.shell(`${SERVER_PATH} --version`).catch(() => '')).trim()
     this.serverReady = true
-    this.host ??= new FridaHost(projectRoot(), this.log)
+    this.host ??= new FridaHost(projectRoot(), this.log, dirname(this.adb.adbPath))
     await this.host.ping()
     this.log(`Frida ${version || FRIDA_VERSION} is running on ${this.adb.serial}.`)
   }

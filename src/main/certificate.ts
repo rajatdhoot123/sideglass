@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { X509Certificate } from '@peculiar/x509'
 import { generateCACertificate } from 'mockttp'
-import type { Adb } from './adb'
+import { shellQuote, type Adb } from './adb'
 
 export interface CaFiles {
   key: string
@@ -50,7 +50,9 @@ export async function installSystemCa(adb: Adb, ca: CaFiles): Promise<void> {
   const scriptLocal = join(process.env.TMPDIR ?? '/tmp', 'sideglass-ca.sh')
   writeFileSync(scriptLocal, caScript(ca.androidName))
   await adb.exec(['push', scriptLocal, script])
-  const out = await adb.shell(`sh ${script}`, 60_000)
+  // The script mounts over /system and enters other processes' mount namespaces: root only,
+  // via Magisk's su (this is a Play Store image; there is no adb root).
+  const out = await adb.shell(`su -c ${shellQuote(`sh ${script}`)}`, 120_000)
   if (!out.includes('SIDEGLASS_CA_OK')) throw new Error(`CA install failed:\n${out}`)
 }
 

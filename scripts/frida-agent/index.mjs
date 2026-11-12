@@ -87,21 +87,20 @@ function hookChain(className, methods) {
     if (!target || !target.overloads) continue
     target.overloads.forEach((overload) => {
       overload.implementation = function () {
-        const returned = returnName(overload)
-        if (returned === 'void') return
-        if (returned === 'boolean') return true
-        const chain = certificateChain(arguments)
-        if (chain) return chain
-        if (returned === 'java.util.List' || returned === 'java.util.Collection') return Java.use('java.util.ArrayList').$new()
-        // Cronet wants an AndroidCertVerifyResult. Status 0 is VERIFIED.
-        if (returned === 'org.chromium.net.AndroidCertVerifyResult') {
-          try {
+        try {
+          const returned = returnName(overload)
+          if (returned === 'void') return
+          if (returned === 'boolean') return true
+          if (returned === 'org.chromium.net.AndroidCertVerifyResult') {
             return Java.use('org.chromium.net.AndroidCertVerifyResult').$new(0)
-          } catch {
-            return null
           }
+          if (returned === 'java.util.List' || returned === 'java.util.Collection') {
+            return certificateChain(arguments) || Java.use('java.util.ArrayList').$new()
+          }
+          return null
+        } catch {
+          return undefined
         }
-        return null
       }
     })
   }
@@ -138,7 +137,14 @@ function tagOkHttp(pkg) {
     const build = Builder.build.overload()
     build.implementation = function () {
       try {
-        this.header(HEADER, pkg)
+        // WebSocket upgrades are not passed through the HTTP header filter. Do not tag them.
+        let scheme = ''
+        try {
+          scheme = String(this.url.value.scheme())
+        } catch {
+          scheme = ''
+        }
+        if (scheme !== 'ws' && scheme !== 'wss') this.header(HEADER, pkg)
       } catch {
         // A builder that rejects the header still has to build.
       }
@@ -220,13 +226,7 @@ function scanAll() {
 function hookFlutter(mod) {
   let count = 0
   for (const name of ['SSL_CTX_set_custom_verify', 'SSL_set_custom_verify']) {
-    let exported = null
-    try {
-      exported = mod.findExportByName(name)
-    } catch {
-      exported = null
-    }
-    if (hookCustomVerify(exported)) count++
+    if (hookCustomVerify(findSymbol(mod, name))) count++
   }
   return count
 }

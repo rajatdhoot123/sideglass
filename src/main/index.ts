@@ -12,6 +12,7 @@ import { Session } from './session'
 import { loadSettings, saveSettings } from './settings'
 import { findSdk, sdkAt } from './sdk'
 import { usbPhones } from './store/usb'
+import type { CloneOptions } from '../shared'
 
 let session: Session | null = null
 let window: BrowserWindow | null = null
@@ -44,7 +45,12 @@ function requireSession(): Session {
 }
 
 ipcMain.handle('session:start', async () => {
-  if (session) return
+  // A leftover session (for example its phone died under it) must not swallow the click.
+  if (session) {
+    const stale = session
+    session = null
+    await stale.stop().catch(() => undefined)
+  }
   const settings = loadSettings(settingsFile())
   if (!settings.phone) return
   const current = new Session(join(app.getPath('userData'), 'data'), settings)
@@ -63,6 +69,9 @@ ipcMain.handle('session:start', async () => {
   current.on('store-log', (l) => send('store-log', l))
   current.on('play-stage', (st) => send('play-stage', st))
   current.on('logcat', (lines) => send('logcat', lines))
+  current.on('hooks-log', (l) => send('hooks-log', l))
+  current.on('hooks-state', (s) => send('hooks-state', s))
+  current.on('app-refusal', (r) => send('app-refusal', r))
   current.proxy.on('exchange', (e) => send('exchange', e))
   current.proxy.on('tls-failure', (f) => send('tls-failure', f))
   try {
@@ -93,7 +102,7 @@ ipcMain.handle('capture:clear', () => {
   current.timeline.clear()
 })
 type Device = 'capture' | 'play'
-const screenOf = (device: Device) => (device === 'play' ? requireSession().play?.screen : requireSession().screen)
+const screenOf = (_device: Device) => requireSession().screen
 const point = (device: Device, x: number, y: number) => {
   const size = screenOf(device)?.frames.size ?? { width: 1080, height: 2400 }
   return `${Math.round(x * size.width)},${Math.round(y * size.height)}`
@@ -169,7 +178,7 @@ ipcMain.handle('screen:refresh', (_, device: Device) => screenOf(device)?.refres
 ipcMain.handle('screen:frames', (_, device: Device) => screenOf(device)?.useFrames())
 ipcMain.handle('screen:state', () => ({
   capture: requireSession().screen?.mode ?? 'frames',
-  play: requireSession().play?.screen?.mode ?? 'frames',
+  play: requireSession().screen?.mode ?? 'frames',
 }))
 ipcMain.handle('apk:install', (_, paths: string[]) => requireSession().installApk(paths))
 ipcMain.handle('store:featured', () => requireSession().featuredApps())
@@ -185,7 +194,10 @@ ipcMain.handle('usb:phones', () => {
 ipcMain.handle('usb:apps', (_, serial: string) => requireSession().usbApps(serial))
 ipcMain.handle('usb:install', (_, serial: string, pkg: string) => requireSession().installFromUsb(serial, pkg))
 ipcMain.handle('apps:list', () => requireSession().packages())
+ipcMain.handle('app:clone', (_, options: CloneOptions) => requireSession().cloneApp(options))
 ipcMain.handle('app:launch', (_, pkg: string, options?: { unpin?: boolean }) => requireSession().launch(pkg, options))
+ipcMain.handle('hooks:set', (_, enabled: boolean) => requireSession().setHooksEnabled(Boolean(enabled)))
+ipcMain.handle('hooks:state', () => requireSession().hooksState())
 ipcMain.handle('clipboard:write', (_, text: string) => {
   if (typeof text !== 'string' || text.length > 1_000_000) throw new Error('Nothing to copy')
   clipboard.writeText(text)

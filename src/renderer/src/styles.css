@@ -59,7 +59,11 @@ button:hover { border-color: var(--accent); }
 .count { background: var(--line); border-radius: 9px; padding: 0 6px; margin-left: 4px; font-size: 11px; }
 .count.warn { background: var(--warn); color: #000; }
 .filterbar { display: flex; gap: 10px; padding: 8px; align-items: center; border-bottom: 1px solid var(--line); }
-.filterbar input[type='text'], .filterbar input:not([type]) { flex: 1; }
+.filterbar input[type='text'], .filterbar input[type='search'], .filterbar input:not([type]) { flex: 1; min-width: 0; }
+.typechips { display: flex; gap: 2px; padding: 4px 8px; align-items: center; border-bottom: 1px solid var(--line); overflow-x: auto; white-space: nowrap; }
+.typechips button { border-color: transparent; background: transparent; border-radius: 10px; padding: 1px 9px; font-size: 12px; }
+.typechips button:hover { background: var(--hover); border-color: transparent; }
+.typechips button.on { background: var(--sel); color: var(--accent); }
 .requests, .logs { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .table { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .rows { overflow: auto; flex: 1; }
@@ -121,6 +125,8 @@ h4 { margin: 10px 0 4px; color: var(--muted); font-weight: 500; }
 }
 button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
 button:disabled { opacity: 0.5; cursor: default; }
+button.on { border-color: var(--accent); color: var(--accent); }
+.right .banner { margin: 0; font-size: 12px; }
 .modal-back { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); display: flex; align-items: center; justify-content: center; z-index: 10; }
 .modal { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; width: 760px; max-width: 95vw; height: 80vh; display: flex; flex-direction: column; }
 .modal.wide { width: 1100px; }
@@ -163,5 +169,12 @@ button:disabled { opacity: 0.5; cursor: default; }
 .setup-actions { display: flex; gap: 8px; }
 .modal.settings { height: auto; max-height: 80vh; }
 .modal.settings .modal-body { padding: 0 12px 12px; }
+.device-switch { max-width: 240px; }
+.modal.clone { width: 520px; }
+.modal.clone .modal-body { display: flex; flex-direction: column; gap: 10px; }
+.modal.clone label:not(.check) { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.modal.clone ul { margin: 0; padding-left: 18px; }
+.modal.clone .banner { margin: 0; }
+.problem-text { white-space: pre-wrap; margin-top: 4px; font-weight: 400; }
 .cert-hint { display: flex; gap: 8px; align-items: center; font-size: 11px; }
 .cert-hint button { flex: none; }

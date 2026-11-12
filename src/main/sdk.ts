@@ -109,16 +109,18 @@ export function installToolsTree(found: string, sdkRoot: string): string {
 }
 
 export function sdkAt(root: string): Sdk | null {
+  const adb = join(root, 'platform-tools', exe('adb'))
+  const emulator = join(root, 'emulator', exe('emulator'))
+  if (!existsSync(adb) || !existsSync(emulator)) return null
   const tools = ['cmdline-tools/latest/bin', 'cmdline-tools/bin', 'tools/bin']
     .map((dir) => join(root, dir))
     .find((dir) => existsSync(join(dir, bat('sdkmanager'))))
-  if (!tools) return null
   return {
     root,
-    adb: join(root, 'platform-tools', exe('adb')),
-    emulator: join(root, 'emulator', exe('emulator')),
-    avdmanager: join(tools, bat('avdmanager')),
-    sdkmanager: join(tools, bat('sdkmanager')),
+    adb,
+    emulator,
+    avdmanager: tools ? join(tools, bat('avdmanager')) : '',
+    sdkmanager: tools ? join(tools, bat('sdkmanager')) : '',
   }
 }
 

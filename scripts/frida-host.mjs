@@ -42,8 +42,6 @@ async function deviceFor(serial) {
   const devices = await frida.enumerateDevices()
   const match = devices.find((device) => device.id === serial || device.name === serial)
   if (match) return match
-  const usb = devices.filter((device) => device.type === 'usb')
-  if (usb.length === 1 && serial.startsWith('emulator-')) return usb[0]
   const listed = devices.map((device) => `${device.id} (${device.type})`).join(', ') || 'none'
   throw new Error(`Frida cannot see ${serial}. Devices: ${listed}`)
 }

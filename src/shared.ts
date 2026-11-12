@@ -5,10 +5,13 @@ import type { ProxyRule } from './main/rules'
 import type { ReplayEdit } from './main/replay'
 import type { Progress } from './main/session'
 import type { StorageEntry } from './main/storage'
+import type { Refusal, RefusalKind } from './main/refusal'
+import type { HooksSnapshot } from './main/hooks'
 import type { StoreApp } from './main/store/fdroid'
 import type { UsbPhone } from './main/store/usb'
+import type { CloneOptions, CloneResult } from './main/clone'
 
-export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput, ProxyRule, ReplayEdit, StorageEntry }
+export type { CloneOptions, CloneResult, LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput, ProxyRule, ReplayEdit, StorageEntry, Refusal, RefusalKind, HooksSnapshot }
 export type Device = 'capture' | 'play'
 /** Which phone Sideglass captures: its own rooted emulator, or the user's phone over USB. */
 export type PhoneMode = 'virtual' | 'usb'
@@ -22,6 +25,8 @@ export interface LaunchResult {
   pid: number | null
   /** Something the user has to do, shown instead of the usual status. */
   message?: string
+  /** True only when this start injected the Frida agent. */
+  hooked?: boolean
 }
 export interface LaunchOptions {
   /** Spawn the app with Frida so certificate checks do not reject the capture proxy. */
@@ -88,6 +93,10 @@ export interface Api {
   pathForFile(file: File): string
   apps(): Promise<string[]>
   launch(pkg: string, options?: LaunchOptions): Promise<LaunchResult>
+  setHooks(enabled: boolean): Promise<HooksSnapshot>
+  hooksState(): Promise<HooksSnapshot>
+  /** Install a renamed, re-signed copy of an installed app next to the original. */
+  cloneApp(options: CloneOptions): Promise<CloneResult>
   copyText(text: string): Promise<void>
   replay(id: string, edit?: ReplayEdit): Promise<void>
   rules(): Promise<ProxyRule[]>
@@ -113,6 +122,9 @@ export interface Api {
   on(channel: 'play-stage', cb: (stage: { stage: 'needs-user' | 'installing' | 'copying' | 'done'; message: string }) => void): () => void
   on(channel: 'logcat', cb: (lines: LogLine[]) => void): () => void
   on(channel: 'input', cb: (input: PhoneInput) => void): () => void
+  on(channel: 'hooks-log', cb: (line: string) => void): () => void
+  on(channel: 'hooks-state', cb: (snapshot: HooksSnapshot) => void): () => void
+  on(channel: 'app-refusal', cb: (refusal: Refusal) => void): () => void
 }
 
 declare global {

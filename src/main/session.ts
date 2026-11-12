@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events'
-import { writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
+import { readFile, writeFile } from 'node:fs/promises'
 import { generateSPKIFingerprint } from 'mockttp'
 import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
-import { CAPTURE_PHONE, ensureAvd, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
+import { CAPTURE_PHONE, ensureAvd, IMAGE_ABI, ramdiskOf, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
 import { DeviceFrida } from './frida'
 import { fromHar } from './har'
 import { History } from './history'
@@ -12,21 +13,33 @@ import { ProtoSchema } from './schema'
 import { ensureSdk } from './sdk'
 import { readAppStorage, type StorageEntry } from './storage'
 import { installApks, isPackageName, pullApp } from './store/apk'
-import { hasPlayStore, installPlayStore, needsPlayLicense, pullPlayStore } from './playstore'
+import { cloneApp, type CloneOptions, type CloneResult } from './clone'
+import { hasPlayStore, needsPlayLicense } from './playstore'
+import {
+  cachedRamdiskPath,
+  disablePlayProtectScans,
+  ensureArtifacts,
+  grantSu,
+  magiskAppInstalled,
+  patchedRamdisk,
+  suGranted,
+} from './magisk'
 import { FEATURED, installFromFdroid, search as searchFdroid } from './store/fdroid'
 import { packageFromPlayLink, PlayHelper } from './store/play'
 import { usbPhones, userApps } from './store/usb'
 import { Adb } from './adb'
 import { Attributor } from './attrib'
+import { Hooks, type HooksSnapshot } from './hooks'
 import { Timeline } from './timeline'
-import { Logcat } from './logcat'
+import { Logcat, type LogLine } from './logcat'
+import { classifyRefusal, type Refusal } from './refusal'
 import { CaptureProxy, summarize, type Exchange, type ExchangeSummary } from './proxy'
 import { Mirror } from './mirror'
 import type { Sdk } from './sdk'
 import type { Device, LaunchOptions, LaunchResult, PhoneMode, Settings } from '../shared'
 import type { ProxyRule } from './rules'
 
-export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'root' | 'device' | 'route' | 'trust' | 'ready'
+export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'magisk' | 'device' | 'route' | 'trust' | 'ready'
 export interface Progress {
   step: StepId
   state: 'running' | 'done' | 'failed'
@@ -52,6 +65,10 @@ export class Session extends EventEmitter {
   private opened = new Map<string, Exchange>()
   /** USB mode: the phone whose proxy setting we changed, and the port, to undo on stop. */
   private routed: { adb: Adb; port: number } | null = null
+  private hooks: Hooks | null = null
+  private hooksEnabled = true
+  /** Apps we launched, so logcat can be watched for them refusing to run. */
+  private refusals = new Map<string, { pid: number | null; seen: Set<Refusal['kind']> }>()
 
   constructor(
     private readonly dataDir: string,
@@ -94,7 +111,13 @@ export class Session extends EventEmitter {
     try {
       this.history = new History(join(this.dataDir, 'history.sqlite'))
       this.history.open()
-      this.proxy.persist = (exchange) => this.history?.save(exchange)
+      this.proxy.persist = (exchange) => {
+        try {
+          this.history?.save(exchange)
+        } catch (error) {
+          this.log(`Could not save the request: ${(error as Error).message}`)
+        }
+      }
     } catch (error) {
       this.log(`Saved sessions are unavailable: ${(error as Error).message}`)
     }
@@ -110,16 +133,57 @@ export class Session extends EventEmitter {
     await this.attachScreen(adb)
     await this.startFrida(adb)
     this.logcat = new Logcat(adb)
-    this.logcat.on('lines', (lines) => this.emit('logcat', lines))
+    this.logcat.on('lines', (lines: LogLine[]) => {
+      this.checkRefusals(lines)
+      this.emit('logcat', lines)
+    })
     this.logcat.start()
     this.progress('ready', 'done', 'Ready')
   }
 
   private async startVirtual(sdk: Sdk, ca: CaFiles, port: number): Promise<Adb> {
     await this.step('avd', 'Preparing virtual phone', () => ensureAvd(sdk, CAPTURE_PHONE, this.log))
-    const emu = await this.step('boot', 'Booting virtual phone', () => startEmulator(sdk, CAPTURE_PHONE, this.log, port))
+    const stock = ramdiskOf(sdk, CAPTURE_PHONE)
+    const cached = existsSync(stock) ? cachedRamdiskPath(this.dataDir, stock) : ''
+    let emu = await this.step('boot', 'Booting virtual phone', async () => {
+      // Only adopt a phone this app booted (see emulator.json): one started by hand or left
+      // by another tool has no capture proxy, and its traffic would never reach us.
+      const recordPath = join(this.dataDir, 'emulator.json')
+      const serial = `emulator-${CAPTURE_PHONE.port}`
+      const record = existsSync(recordPath)
+        ? (JSON.parse(await readFile(recordPath, 'utf8').catch(() => 'null')) as { proxyPort?: number } | null)
+        : null
+      const running = (await Adb.devices(sdk.adb)).some((d) => d.serial === serial && d.state === 'device')
+      if (running && record?.proxyPort !== port) {
+        this.log('The running phone was not started for this session — restarting it with capture routing...')
+        await new Adb(sdk.adb, serial).exec(['emu', 'kill']).catch(() => undefined)
+        await new Promise((r) => setTimeout(r, 3000))
+      }
+      const started = await startEmulator(sdk, CAPTURE_PHONE, this.log, port, cached && existsSync(cached) ? cached : undefined)
+      await writeFile(recordPath, JSON.stringify({ proxyPort: port, at: Date.now() })).catch(() => undefined)
+      return started
+    })
     this.emulator = emu
-    await this.step('root', 'Getting root on the virtual phone', () => emu.adb.root())
+    await this.step('magisk', 'Setting up Magisk root', async () => {
+      await disablePlayProtectScans(emu.adb)
+      if (await suGranted(emu.adb)) {
+        this.log('Root is available through Magisk su')
+        return
+      }
+      const artifacts = await ensureArtifacts(this.dataDir, this.log, IMAGE_ABI)
+      if (!(await magiskAppInstalled(emu.adb))) {
+        this.log('Installing the Magisk manager app...')
+        await emu.adb.exec(['install', '-r', artifacts.apk], 300_000)
+      }
+      if (!(cached && existsSync(cached))) {
+        const patched = await patchedRamdisk(emu.adb, this.dataDir, stock, this.log, IMAGE_ABI)
+        this.log('Restarting the phone with the Magisk ramdisk...')
+        await stopEmulator(emu)
+        emu = await startEmulator(sdk, CAPTURE_PHONE, this.log, port, patched)
+        this.emulator = emu
+      }
+      await grantSu(emu.adb, artifacts.apk, this.log)
+    })
     await this.step('trust', 'Installing certificate as a system CA', async () => {
       await this.trust(emu.adb, ca)
       this.log(`Android API ${await sdkVersion(emu.adb)}: CA ${ca.androidName} trusted`)
@@ -138,13 +202,13 @@ export class Session extends EventEmitter {
       const phones = await usbPhones(sdk.adb)
       if (!phones.length) {
         throw new Error(
-          'No phone found. Connect it with a USB cable, turn on USB debugging (Settings → Developer options) and allow this computer on the phone.',
+          'No phone found. Connect it with a USB cable, turn on USB debugging (Settings → Developer options) and allow this computer on the phone, or start another emulator.',
         )
       }
       const wanted = this.settings.usbSerial
       const phone = phones.find((p) => p.serial === wanted) ?? phones[0]
       if (wanted && phone.serial !== wanted) this.log(`${wanted} is not connected; using ${phone.model} instead`)
-      this.log(`Using ${phone.model} (${phone.serial})`)
+      this.log(`Using ${phone.model} (${phone.serial}${phone.emulator ? ', emulator' : ''})`)
       return new Adb(sdk.adb, phone.serial)
     })
     await this.step('route', "Routing the phone's traffic through Sideglass", async () => {
@@ -203,33 +267,17 @@ export class Session extends EventEmitter {
   private async setUpPlayStore(): Promise<void> {
     const adb = this.requireAdb()
     if (await hasPlayStore(adb)) return
-    const say = (line: string) => this.emit('store-log', line)
-    say('This app checks its Google Play licence. Copying Google Play from the Play phone (first time only)…')
-    const files = await pullPlayStore(await this.playHelper().start(), join(this.dataDir, 'playstore'))
-    this.logcat?.stop()
-    this.screen?.stop()
-    try {
-      await installPlayStore(adb, files, say)
-      await adb.root()
-      await this.trust(adb, this.ca!)
-      await this.frida?.start().catch((error: Error) => this.log(`Frida did not restart: ${error.message}`))
-    } finally {
-      this.logcat = new Logcat(adb)
-      this.logcat.on('lines', (lines) => this.emit('logcat', lines))
-      this.logcat.start()
-      await this.attachScreen(adb)
-    }
-    say('Google Play is on the capture phone.')
+    throw new Error('This virtual phone has no Play Store. The capture phone is a Play image; check the system image.')
   }
 
   private playHelper(): PlayHelper {
+    const adb = this.requireAdb()
     if (!this.play) {
-      this.play = new PlayHelper(this.sdk!, join(this.dataDir, 'scrcpy'))
+      this.play = new PlayHelper(adb)
       this.play.on('log', (l) => this.emit('store-log', l))
-      this.play.on('frame', (png: Buffer) => this.emit('play-frame', png))
-      this.play.on('video', (packet) => this.emit('play-video', packet))
-      this.play.on('screen-mode', (mode) => this.emit('play-screen-mode', mode))
       this.play.on('stage', (st) => this.emit('play-stage', st))
+    } else {
+      this.play.adopt(adb)
     }
     return this.play
   }
@@ -271,8 +319,9 @@ export class Session extends EventEmitter {
   }
 
   /**
-   * Play Store link: open it on the Play phone, wait for the user to tap Install there,
-   * copy the APK files and install them on the capture phone.
+   * Play Store link: open it on the capture phone's own Play Store, wait for the app to
+   * install there. Sideglass taps Install itself and only stops for the user (sign-in,
+   * prompts, paid apps).
    */
   async installFromPlay(link: string): Promise<string> {
     const pkg = packageFromPlayLink(link)
@@ -289,15 +338,12 @@ export class Session extends EventEmitter {
   private async runPlay(pkg: string): Promise<string> {
     const play = this.playHelper()
     this.playCancelled = false
-    this.emit('store-log', 'Starting the Play Store phone (first time: sign in with your Google account)…')
+    this.emit('store-log', `Opening ${pkg} in the Play Store on the capture phone…`)
     const installed = await play.open(pkg)
-    this.emit('store-log', installed ? `${pkg} is already on the Play phone` : `Tap Install on the Play phone for ${pkg}`)
-    const apks = await play.waitAndPull(pkg, join(this.downloads, 'play'), undefined, () => this.playCancelled)
-    this.emit('store-log', `Copying ${apks.length} APK file(s) to the capture phone…`)
-    // Record Google Play as the installer, as on a real phone; licence checks look at it.
-    const result = await installApks(this.requireAdb(), apks, 'com.android.vending')
-    this.emit('store-log', `${pkg}: ${result}`)
-    this.emit('play-stage', { stage: 'done', message: `${pkg} is on the capture phone.` })
+    this.emit('store-log', installed ? `${pkg} is already installed` : 'Sideglass taps Install for you — sign in if the store asks')
+    await play.waitAndInstall(pkg, () => this.playCancelled)
+    this.emit('store-log', `${pkg} is on the capture phone.`)
+    this.emit('play-stage', { stage: 'done', message: `${pkg} is installed.` })
     return pkg
   }
 
@@ -315,6 +361,19 @@ export class Session extends EventEmitter {
     const result = await installApks(this.requireAdb(), apks)
     this.emit('store-log', `${pkg}: ${result}`)
     return result
+  }
+
+  private cloning: string | null = null
+
+  /** Install a copy of an installed app under a new package and name, next to the original. */
+  async cloneApp(options: CloneOptions): Promise<CloneResult> {
+    if (this.cloning) throw new Error(`Already cloning ${this.cloning}. Wait for it to finish.`)
+    this.cloning = options.pkg
+    try {
+      return await cloneApp(this.requireAdb(), this.sdk!, this.dataDir, options, (l) => this.emit('store-log', l))
+    } finally {
+      this.cloning = null
+    }
   }
 
   async packages(): Promise<string[]> {
@@ -346,6 +405,19 @@ export class Session extends EventEmitter {
     const component = resolved.trim().split('\n').pop()?.trim() ?? ''
     if (!component.startsWith(`${pkg}/`)) throw new Error(`${pkg} has no launcher activity`)
     if (this.attrib) this.attrib.preferPkg = pkg
+    this.refusals.delete(pkg)
+    // Hooks need root. A USB phone, and any other emulator treated as one, stays on a normal launch.
+    if (this.hooksEnabled && this.mode === 'virtual') {
+      try {
+        const pid = await this.getHooks().launch(pkg)
+        this.watch(pkg, pid)
+        return { device: 'capture', pid, hooked: true, message }
+      } catch (error) {
+        const fallback = `Hooks unavailable (${(error as Error).message}); launching normally`
+        this.emit('hooks-log', fallback)
+        message = message ? `${message} ${fallback}` : fallback
+      }
+    }
     await adb.shell(`am force-stop ${pkg}`)
     if (options?.unpin) {
       if (!this.frida) {
@@ -357,7 +429,49 @@ export class Session extends EventEmitter {
     }
     await adb.shell(`am start -n '${component}'`)
     await new Promise((r) => setTimeout(r, 1500))
-    return { device: 'capture', pid: await this.pidOf(pkg), message }
+    const pid = await this.pidOf(pkg)
+    if (pid) this.watch(pkg, pid)
+    return { device: 'capture', pid, hooked: false, message }
+  }
+
+  /** Watch logcat from a launched app so the UI can say why it refused to run. */
+  private watch(pkg: string, pid: number | null): void {
+    this.refusals.set(pkg, { pid, seen: new Set() })
+  }
+
+  private checkRefusals(lines: LogLine[]): void {
+    for (const [pkg, info] of this.refusals) {
+      const hit = classifyRefusal(lines, pkg, info.pid)
+      if (hit && !info.seen.has(hit.kind)) {
+        info.seen.add(hit.kind)
+        this.emit('app-refusal', hit)
+      }
+    }
+  }
+
+  private getHooks(): Hooks {
+    if (!this.hooks) {
+      this.hooks = new Hooks(() => this.requireAdb(), IMAGE_ABI, join(this.dataDir, 'frida'), {
+        log: (line) => this.emit('hooks-log', line),
+        state: (snapshot) => this.emit('hooks-state', snapshot),
+      })
+    }
+    return this.hooks
+  }
+
+  setHooksEnabled(on: boolean): HooksSnapshot {
+    this.hooksEnabled = on
+    // Snapshot reads Hooks.enabled. Update it first, or the switch sticks on the old value.
+    if (this.hooks) this.hooks.enabled = on
+    const snapshot = this.hooksState()
+    this.emit('hooks-state', snapshot)
+    return snapshot
+  }
+
+  hooksState(): HooksSnapshot {
+    const live = this.hooks?.snapshot()
+    if (!live) return { enabled: this.hooksEnabled, ready: false, starting: false, message: '' }
+    return { ...live, enabled: this.hooksEnabled }
   }
 
   async pidOf(pkg: string): Promise<number | null> {
@@ -367,9 +481,7 @@ export class Session extends EventEmitter {
 
   async sendSms(device: Device, from: string, text: string): Promise<void> {
     if (this.mode !== 'virtual') throw new Error('Test SMS only works on the virtual phone')
-    const adb = device === 'play' ? this.play?.emulator?.adb : this.requireAdb()
-    if (!adb) throw new Error(device === 'play' ? 'The Play phone is not running' : 'No device yet')
-    await adb.exec(['emu', 'sms', 'send', from, text])
+    await this.requireAdb().exec(['emu', 'sms', 'send', from, text])
   }
 
   private requireAdb() {
@@ -464,7 +576,7 @@ export class Session extends EventEmitter {
     this.attrib = null
     this.screen?.stop()
     this.logcat?.stop()
-    await this.play?.stop().catch(() => undefined)
+    await this.hooks?.stop().catch(() => undefined)
     if (this.routed) {
       // Give the phone its own internet back; otherwise it keeps pointing at a closed proxy.
       const { adb, port } = this.routed

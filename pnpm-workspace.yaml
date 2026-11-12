@@ -1,0 +1,18 @@
+# Sideglass is a single package; this file exists because pnpm 11 reads
+# lifecycle-script approvals from here.
+packages: [ '.' ]
+
+allowBuilds:
+  electron: true
+  electron-winstaller: false
+  esbuild: true
+  frida: true
+  tls-impersonate: true
+
+# Build steps needed for the app to work: frida's native binding, esbuild's
+# binary check, and mockttp's TLS-impersonation accelerator.
+onlyBuiltDependencies:
+  - frida
+  - esbuild
+  - tls-impersonate
+  - electron

@@ -27,8 +27,11 @@ export async function pullApp(adb: Adb, pkg: string, dir: string): Promise<strin
   return local
 }
 
-/** Install one APK or a set of splits. Returns adb's last line ("Success" or the failure). */
-export async function installApks(adb: Adb, paths: string[], installer?: string): Promise<string> {
+/**
+ * Install one APK or a set of splits. Returns adb's last line ("Success" or the failure).
+ * With [replaceMismatched], a user-installed copy signed with another key is uninstalled first.
+ */
+export async function installApks(adb: Adb, paths: string[], installer?: string, replaceMismatched = true): Promise<string> {
   const flags = ['-r', '-g', ...(installer ? ['-i', installer] : [])]
   const args = paths.length > 1 ? ['install-multiple', ...flags, ...paths] : ['install', ...flags, paths[0]]
   try {
@@ -39,6 +42,9 @@ export async function installApks(adb: Adb, paths: string[], installer?: string)
     const message = (err.stderr || err.stdout || err.message).trim().split('\n').pop() ?? err.message
     const pkg = /Existing package (\S+) signatures do not match/.exec(message)?.[1]
     if (!pkg) throw new Error(message)
+    if (!replaceMismatched) {
+      throw new Error(`${pkg} is already installed and signed with another key. Pick another package name, or uninstall it first.`)
+    }
     // A copy signed with another key is already there. Replace it if the user installed it;
     // a system app (preinstalled Google app) cannot be replaced.
     const system = (await adb.shell(`pm list packages -s ${pkg}`).catch(() => '')).split('\n').some((l) => l.trim() === `package:${pkg}`)

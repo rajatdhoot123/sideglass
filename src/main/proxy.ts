@@ -106,8 +106,22 @@ export class CaptureProxy extends EventEmitter {
       passthrough: ['unknown-protocol'],
       recordTraffic: false,
     })
-    await server.start(port ? { startPort: port, endPort: port + 50 } : undefined)
-    // A block or mock matches ahead of this fallback. The header from a Frida-launched app is removed here.
+    try {
+      // Exactly this port: the emulator routes to it by name, so drifting to a neighbour
+      // port would silently send the phone's traffic nowhere.
+      await server.start(port ? { startPort: port, endPort: port } : undefined)
+    } catch (error) {
+      if (port)
+        throw new Error(
+          `Could not start the capture proxy on port ${port} — another Sideglass session may still be running. Stop it and try again.`,
+        )
+      throw error
+    }
+    const stripAppHeader = (headers: Record<string, string | string[] | undefined>) => {
+      const copy = { ...headers }
+      takeAppHeader(copy)
+      return copy
+    }
     await server.forAnyRequest().matching((req) => findRule(this.rules, req.url) !== undefined).thenCallback((req) => {
       const rule = findRule(this.rules, req.url)
       if (!rule || rule.kind === 'block') return { statusCode: 403, statusMessage: 'Blocked', body: 'Blocked by Sideglass' }
@@ -119,11 +133,7 @@ export class CaptureProxy extends EventEmitter {
     })
     await server.forUnmatchedRequest().thenPassThrough({
       ignoreHostHttpsErrors: false,
-      beforeRequest: (req) => {
-        const headers = { ...req.headers }
-        takeAppHeader(headers)
-        return { headers }
-      },
+      beforeRequest: (req) => ({ headers: stripAppHeader(req.headers) }),
     })
     await server.forAnyWebSocket().thenPassThrough()
 

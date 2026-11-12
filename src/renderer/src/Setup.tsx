@@ -6,7 +6,7 @@ const COMMON: [string, string][] = [
   ['proxy', 'Capture proxy'],
 ]
 const STEPS: Record<PhoneMode, [string, string][]> = {
-  virtual: [...COMMON, ['avd', 'Virtual phone'], ['boot', 'Boot'], ['root', 'Root access'], ['trust', 'Trust certificate']],
+  virtual: [...COMMON, ['avd', 'Virtual phone'], ['boot', 'Boot'], ['magisk', 'Magisk root'], ['trust', 'Trust certificate']],
   usb: [...COMMON, ['device', 'Find your phone'], ['route', 'Route traffic over USB'], ['trust', 'Copy certificate']],
 }
 

@@ -9,7 +9,7 @@
     "start": "electron-vite preview",
     "typecheck": "tsc -p .",
     "smoke": "tsx scripts/smoke.mts",
-    "test": "tsx --test src/main/*.test.ts",
+    "test": "tsx --test src/main/*.test.ts src/main/clone/*.test.ts src/renderer/src/*.test.ts",
     "pack": "electron-builder --publish never"
   },
   "license": "Apache-2.0",
@@ -40,5 +40,8 @@
     "protobufjs": "^8.8.1",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
+  },
+  "allowScripts": {
+    "frida@17.26.2": true
   }
 }
