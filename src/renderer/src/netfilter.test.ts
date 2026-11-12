@@ -68,3 +68,54 @@ test('resource types', () => {
   assert.equal(resourceType({ contentType: 'application/octet-stream', path: '/blob' }), 'other')
   assert.equal(resourceType({ contentType: undefined, path: '/api' }), 'fetch')
 })
+
+test('status-code never builds a regex from arbitrary input', () => {
+  const e = ex({})
+  for (const q of ['status-code:*', 'status-code:[', 'status-code:(', 'status-code:+']) assert.doesNotThrow(() => keep(q, e), q)
+  assert.ok(!keep('status-code:2..', e))
+  assert.ok(!keep('status-code:200|500', e))
+  assert.ok(keep('status-code:aborted', ex({ state: 'aborted', status: undefined })))
+})
+
+test('g and y regex flags do not carry state between rows', () => {
+  const f = parseFilter('/users/g')
+  assert.deepEqual([1, 2, 3, 4, 5].map(() => f(ex({}))), [true, true, true, true, true])
+  assert.ok(parseFilter('/users/y')(ex({})))
+})
+
+test('domain matches the host or a subdomain, ignoring ports', () => {
+  assert.ok(keep('domain:example.com', ex({})))
+  assert.ok(keep('domain:example.com', ex({ host: 'example.com' })))
+  assert.ok(!keep('domain:example.com', ex({ host: 'notexample.com' })))
+  assert.ok(!keep('domain:example.com', ex({ host: 'example.com.evil.test' })))
+  assert.ok(!keep('domain:com', ex({})))
+  assert.ok(keep('domain:api.example.com:8443', ex({ host: 'api.example.com:8443' })))
+  assert.ok(keep('domain:api.example.com', ex({ host: 'api.example.com:8443' })))
+})
+
+test('path wildcards ignore the query string', () => {
+  assert.ok(keep('path:*users', ex({})))
+  assert.ok(keep('path:*.png', ex({ path: '/a.png?w=100' })))
+  assert.ok(keep('path:id=2', ex({})))
+})
+
+test('unknown body size matches neither size filter', () => {
+  const pending = ex({ state: 'pending', status: undefined, responseBodySize: undefined })
+  assert.ok(!keep('smaller-than:10', pending))
+  assert.ok(!keep('larger-than:0', pending))
+  assert.ok(keep('smaller-than:10', ex({ responseBodySize: 0 })))
+})
+
+test('comma lists tolerate spaces', () => {
+  assert.ok(keep('method:"POST, GET"', ex({})))
+  assert.ok(keep('method:POST, GET', ex({})))
+  assert.ok(keep('method:POST, GET users', ex({})))
+})
+
+test('resource types match whole media-type tokens', () => {
+  const office = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  assert.equal(resourceType({ contentType: office, path: '/deck' }), 'other')
+  assert.equal(resourceType({ contentType: 'application/vnd.ms-opentype', path: '/f' }), 'font')
+  assert.equal(resourceType({ contentType: 'text/event-stream', path: '/s' }), 'fetch')
+  assert.equal(resourceType({ contentType: 'application/graphql', path: '/q' }), 'fetch')
+})

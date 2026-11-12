@@ -55,15 +55,17 @@ export function Requests({ list, focusApp }: { list: ExchangeSummary[]; focusApp
   }, [focusApp])
 
   const matches = useMemo(() => parseFilter(filter), [filter])
-  const rows = useMemo(() => {
+  const LIMIT = 1500
+  const matched = useMemo(() => {
     const active = filter.trim() !== ''
     return list
       .filter((e) => app === '__all__' || e.app === app || (!picked && !e.app))
       .filter((e) => !hideGoogle || !/(^|\.)(google(apis)?\.com|gstatic\.com|gvt1\.com|googleusercontent\.com)$/.test(e.host.replace(/:\d+$/, '')))
       .filter((e) => types.size === 0 || types.has(resourceType(e)))
       .filter((e) => !active || matches(e) !== invert)
-      .slice(-1500)
   }, [list, filter, matches, invert, types, hideGoogle, app, picked])
+
+  const rows = useMemo(() => matched.slice(-LIMIT), [matched])
 
   /** Click picks one type; Cmd/Ctrl-click adds or removes it, as in Chrome. */
   const pickType = (type: ResourceType | null, multi: boolean) => {
@@ -128,7 +130,7 @@ export function Requests({ list, focusApp }: { list: ExchangeSummary[]; focusApp
         ))}
         <span className="spacer" />
         <span className="muted small">
-          {rows.length} / {list.length} requests
+          {matched.length > LIMIT ? `showing last ${LIMIT} of ${matched.length} matched` : `${matched.length} matched`} · {list.length} total
         </span>
       </div>
       <div className="table">

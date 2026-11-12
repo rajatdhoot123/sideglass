@@ -30,13 +30,21 @@ const EXT: [RegExp, ResourceType][] = [
 export function resourceType(e: Pick<ExchangeSummary, 'contentType' | 'path'>): ResourceType {
   const t = (e.contentType ?? '').toLowerCase().split(';')[0].trim()
   if (t) {
+    // Whole tokens of the media type, split on `/`, `+`, `.` and `-`: `vnd.openxmlformats-…` is not `xml`.
+    const words = new Set(t.split(/[/+.-]/))
+    const has = (...w: string[]) => w.some((x) => words.has(x))
     if (t === 'text/html' || t === 'application/xhtml+xml') return 'doc'
     if (t === 'text/css') return 'css'
-    if (/javascript|ecmascript/.test(t)) return 'js'
-    if (t.startsWith('font/') || /font/.test(t)) return 'font'
+    if (has('javascript', 'ecmascript')) return 'js'
+    if (t.startsWith('font/') || has('font', 'opentype', 'woff', 'woff2', 'ttf', 'otf')) return 'font'
     if (t.startsWith('image/')) return 'img'
-    if (t.startsWith('video/') || t.startsWith('audio/') || /mpegurl|dash\+xml/.test(t)) return 'media'
-    if (/json|xml|protobuf|proto|grpc|x-www-form-urlencoded|text\/plain|thrift|msgpack|cbor/.test(t)) return 'fetch'
+    if (t.startsWith('video/') || t.startsWith('audio/') || has('mpegurl') || t === 'application/dash+xml') return 'media'
+    if (
+      has('json', 'xml', 'protobuf', 'proto', 'grpc', 'thrift', 'msgpack', 'cbor', 'graphql', 'urlencoded') ||
+      t === 'text/plain' ||
+      t === 'text/event-stream'
+    )
+      return 'fetch'
   }
   const file = e.path.split(/[?#]/)[0].toLowerCase()
   for (const [re, type] of EXT) if (re.test(file)) return type
@@ -66,7 +74,10 @@ function glob(value: string): (s: string) => boolean {
 const hostOnly = (host: string) => host.replace(/:\d+$/, '')
 
 function keyClause(key: string, value: string): ((e: ExchangeSummary) => boolean) | undefined {
-  const values = value.split(',').filter(Boolean)
+  const values = value
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean)
   if (values.length === 0) return undefined
   const any = (f: (v: string) => (e: ExchangeSummary) => boolean) => {
     const tests = values.map(f)
@@ -77,20 +88,34 @@ function keyClause(key: string, value: string): ((e: ExchangeSummary) => boolean
       return any((v) => (e) => e.method.toLowerCase() === v.toLowerCase())
     case 'status-code':
     case 'status':
+      // Only digits and `x` (4xx, 40x) or `aborted`. Anything else is plain text, never a regex.
+      if (!values.every((v) => /^[0-9x]+$/i.test(v) || v.toLowerCase() === 'aborted')) return undefined
       return any((v) => {
-        // 4xx / 40x style ranges.
+        if (v.toLowerCase() === 'aborted') return (e) => e.state === 'aborted'
         const re = new RegExp(`^${v.replace(/x/gi, '\\d')}$`)
-        return (e) => (e.state === 'aborted' ? v.toLowerCase() === 'aborted' : e.status !== undefined && re.test(String(e.status)))
+        return (e) => e.state !== 'aborted' && e.status !== undefined && re.test(String(e.status))
       })
     case 'domain':
     case 'host':
       return any((v) => {
-        const m = glob(v)
-        return (e) => m(hostOnly(e.host))
+        const want = hostOnly(v).toLowerCase()
+        if (want.includes('*')) {
+          const m = glob(want)
+          return (e) => m(hostOnly(e.host))
+        }
+        // The host itself or a subdomain of it: `example.com` is not `notexample.com`.
+        // A bare label such as `com` matches only itself, not every .com host.
+        const suffix = want.includes('.')
+        return (e) => {
+          const host = hostOnly(e.host).toLowerCase()
+          return host === want || (suffix && host.endsWith(`.${want}`))
+        }
       })
     case 'path':
       return any((v) => {
         const m = glob(v)
+        // A wildcard is anchored, so match it against the path without its query: `*.png` matches `/a.png?w=1`.
+        if (v.includes('*')) return (e) => m(e.path.split(/[?#]/)[0]) || m(e.path)
         return (e) => m(e.path)
       })
     case 'app':
@@ -109,7 +134,10 @@ function keyClause(key: string, value: string): ((e: ExchangeSummary) => boolean
     case 'smaller-than': {
       const n = bytes(value)
       if (n === undefined) return undefined
-      return key === 'larger-than' ? (e) => (e.responseBodySize ?? 0) > n : (e) => (e.responseBodySize ?? 0) < n
+      // No size yet (in flight, or aborted before a body) is unknown, not empty.
+      return key === 'larger-than'
+        ? (e) => e.responseBodySize !== undefined && e.responseBodySize > n
+        : (e) => e.responseBodySize !== undefined && e.responseBodySize < n
     }
     case 'is':
       return any((v) => {
@@ -129,7 +157,7 @@ function keyClause(key: string, value: string): ((e: ExchangeSummary) => boolean
 
 /** Splits on spaces, keeping `"quoted text"` and `/regex with spaces/` whole. */
 function tokens(query: string): string[] {
-  return query.match(/-?\/(?:\\.|[^/])+\/[a-z]*|-?[\w-]+:"[^"]*"|-?"[^"]*"|\S+/gi) ?? []
+  return query.match(/-?\/(?:\\.|[^/])+\/[a-z]*|-?[\w-]+:"[^"]*"|-?"[^"]*"|-?[\w-]+:[^\s,]*(?:,\s*[^\s,]+)+|\S+/gi) ?? []
 }
 
 /**
@@ -150,7 +178,9 @@ export function parseFilter(query: string): (e: ExchangeSummary) => boolean {
     const regex = /^\/(.+)\/([a-z]*)$/i.exec(token)
     if (regex) {
       try {
-        const re = new RegExp(regex[1], regex[2].includes('i') ? regex[2] : `${regex[2]}i`)
+        // `g` and `y` make test() stateful across rows; drop them. Case-insensitive unless asked otherwise.
+        const flags = regex[2].replace(/[gy]/g, '')
+        const re = new RegExp(regex[1], flags.includes('i') ? flags : `${flags}i`)
         clauses.push({ negate, test: (e) => re.test(e.url) })
         continue
       } catch {
