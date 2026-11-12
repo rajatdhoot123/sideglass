@@ -122,13 +122,13 @@ export class Session extends EventEmitter {
       const phones = await usbPhones(sdk.adb)
       if (!phones.length) {
         throw new Error(
-          'No phone found. Connect it with a USB cable, turn on USB debugging (Settings → Developer options) and allow this computer on the phone.',
+          'No phone found. Connect it with a USB cable, turn on USB debugging (Settings → Developer options) and allow this computer on the phone, or start another emulator.',
         )
       }
       const wanted = this.settings.usbSerial
       const phone = phones.find((p) => p.serial === wanted) ?? phones[0]
       if (wanted && phone.serial !== wanted) this.log(`${wanted} is not connected; using ${phone.model} instead`)
-      this.log(`Using ${phone.model} (${phone.serial})`)
+      this.log(`Using ${phone.model} (${phone.serial}${phone.emulator ? ', emulator' : ''})`)
       return new Adb(sdk.adb, phone.serial)
     })
     await this.step('route', "Routing the phone's traffic through Sideglass", async () => {

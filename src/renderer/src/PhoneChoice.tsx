@@ -13,9 +13,9 @@ const OPTIONS: { id: PhoneMode; title: string; points: string[] }[] = [
   },
   {
     id: 'usb',
-    title: 'My phone over USB',
+    title: 'My phone or another emulator',
     points: [
-      'Use your own Android phone. No root needed, just USB debugging.',
+      'Use your own Android phone (USB debugging on), or an emulator already running on this computer. No root needed.',
       'Shows every host an app talks to. HTTPS contents only for apps that trust user certificates (Chrome, your own debug builds).',
       'Google Play, licence checks and your SIM work as normal.',
     ],
@@ -64,7 +64,7 @@ export function PhoneChoice({ initial, saveLabel, onSave }: { initial: Settings;
               <option value="">Any connected phone</option>
               {phones.map((p) => (
                 <option key={p.serial} value={p.serial}>
-                  {p.model} ({p.serial})
+                  {p.model} ({p.emulator ? 'emulator, ' : ''}{p.serial})
                 </option>
               ))}
             </select>
@@ -98,5 +98,39 @@ export function SettingsDialog({ initial, onClose, onSave }: { initial: Settings
         </div>
       </div>
     </div>
+  )
+}
+
+/** Top-bar switcher: Sideglass's virtual phone or any connected device. Choosing one restarts the session. */
+export function DeviceSwitch({ current, onSave }: { current: Settings; onSave: (s: Settings) => void }) {
+  const [phones, setPhones] = useState<UsbPhone[]>([])
+  const refresh = () => void window.api.usbPhones().then(setPhones, () => setPhones([]))
+  useEffect(refresh, [])
+  const value = current.phone === 'usb' ? `usb:${current.usbSerial ?? ''}` : 'virtual'
+  const listed = phones.some((p) => `usb:${p.serial}` === value)
+  return (
+    <select
+      className="device-switch"
+      title="Which phone Sideglass watches"
+      value={value}
+      // Devices come and go; look again whenever the list is opened.
+      onMouseDown={refresh}
+      onFocus={refresh}
+      onChange={(e) => {
+        const next = e.target.value
+        if (next === value) return
+        onSave(next === 'virtual' ? { phone: 'virtual' } : { phone: 'usb', usbSerial: next.slice(4) || undefined })
+      }}
+    >
+      <option value="virtual">Sideglass virtual phone</option>
+      {current.phone === 'usb' && !listed && (
+        <option value={value}>{current.usbSerial ? `${current.usbSerial} (not connected)` : 'Any connected device'}</option>
+      )}
+      {phones.map((p) => (
+        <option key={p.serial} value={`usb:${p.serial}`}>
+          {p.model} ({p.emulator ? 'emulator' : 'USB'}, {p.serial})
+        </option>
+      ))}
+    </select>
   )
 }

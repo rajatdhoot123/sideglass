@@ -156,6 +156,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .setup-actions { display: flex; gap: 8px; }
 .modal.settings { height: auto; max-height: 80vh; }
 .modal.settings .modal-body { padding: 0 12px 12px; }
+.device-switch { max-width: 240px; }
 .modal.clone { width: 520px; }
 .modal.clone .modal-body { display: flex; flex-direction: column; gap: 10px; }
 .modal.clone label:not(.check) { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
