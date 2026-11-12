@@ -80,7 +80,10 @@ export function readEntry(zip: Buffer, name: string): Buffer | null {
 /** v1 signature files. The new signer writes its own. */
 const isSignature = (name: string) => /^META-INF\/([^/]+\.(SF|RSA|DSA|EC)|MANIFEST\.MF)$/i.test(name)
 
-/** A copy of the APK with [replace]d entries (deflated) and without its old signature. */
+/**
+ * A copy of the APK with [replace]d entries and without its old signature. A replaced entry keeps
+ * its compression: Android requires resources.arsc to stay stored (uncompressed).
+ */
 export function repack(zip: Buffer, replace: Map<string, Buffer>): Buffer {
   const locals: Buffer[] = []
   const centrals: Buffer[] = []
@@ -90,8 +93,8 @@ export function repack(zip: Buffer, replace: Map<string, Buffer>): Buffer {
     const entry = { ...original }
     const contents = replace.get(entry.name)
     if (contents) {
-      entry.method = 8
-      entry.data = deflateRawSync(contents)
+      entry.method = original.method === 0 ? 0 : 8
+      entry.data = entry.method === 0 ? contents : deflateRawSync(contents)
       entry.crc = crc32(contents)
       entry.size = contents.length
       entry.compressedSize = entry.data.length

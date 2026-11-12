@@ -48,7 +48,8 @@ left; the phone is on the right, and you click and drag on it to use it.
   package name) are renamed in the dex files too, with [apktool](https://apktool.org) (Apache-2.0,
   downloaded on first use; needs Java). The copy is signed with a Sideglass key, made once, using the
   SDK build-tools (`zipalign`, `apksigner`, downloaded if missing). Apps that check their own
-  signature, Google sign-in, Play licensing or Play Integrity may refuse to run as a clone.
+  signature, Google sign-in, Play licensing or Play Integrity may refuse to run as a clone. Push
+  notifications (FCM) need the new package added to the app's Firebase project.
 - **Apps that check their Google Play licence** (PairIP, LVL): the first launch puts the real
   Play Store on the capture phone (copied from the Play phone, kept in its writable system), so
   the app runs where its traffic is captured. Sign in to Google Play there once with the account

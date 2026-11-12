@@ -9,6 +9,7 @@ import type { Adb } from '../adb'
 import type { Sdk } from '../sdk'
 import { installApks, isPackageName, pullApp } from '../store/apk'
 import { patchManifest } from './axml'
+import { renameResourcePackage } from './arsc'
 import { renameInCode } from './code'
 import { readEntry, repack } from './zip'
 
@@ -163,6 +164,9 @@ export async function cloneApp(adb: Adb, sdk: Sdk, dataDir: string, options: Clo
     if (patched.oldPkg !== pkg) throw new Error(`${name} belongs to ${patched.oldPkg}, not ${pkg}`)
     for (const [from, to] of patched.renames) if (from.includes(pkg)) renames.set(from, to)
     const replace = new Map([['AndroidManifest.xml', patched.manifest]])
+    const arsc = readEntry(zip, 'resources.arsc')
+    const table = arsc && renameResourcePackage(arsc, pkg, newPkg)
+    if (table) replace.set('resources.arsc', table)
     try {
       const code = await renameInCode(apk, renames, out, join(dataDir, 'tools'), log)
       if (code) {

@@ -147,3 +147,28 @@ test('repack replaces one entry, keeps the rest, and drops the old signature', (
   assert.equal(readEntry(out, 'resources.arsc')?.toString(), 'arsc')
   assert.equal(readEntry(out, 'META-INF/CERT.RSA'), null)
 })
+
+test('renameResourcePackage renames the app package in the resource table only', async () => {
+  const { renameResourcePackage } = await import('./arsc')
+  const pkgChunk = (id: number, name: string) => {
+    const c = Buffer.alloc(288)
+    c.writeUInt16LE(0x0200, 0)
+    c.writeUInt16LE(288, 2)
+    c.writeUInt32LE(288, 4)
+    c.writeUInt32LE(id, 8)
+    c.write(name, 12, 'utf16le')
+    return c
+  }
+  const head = Buffer.alloc(12)
+  head.writeUInt16LE(0x0002, 0)
+  head.writeUInt16LE(12, 2)
+  head.writeUInt32LE(12 + 288 * 2, 4)
+  head.writeUInt32LE(2, 8)
+  const arsc = Buffer.concat([head, pkgChunk(0x7f, 'com.old'), pkgChunk(0x02, 'com.lib')])
+  const out = renameResourcePackage(arsc, 'com.old', 'com.fresh')!
+  const name = (at: number) => out.toString('utf16le', at + 12, at + 12 + 256).split('\0')[0]
+  assert.equal(name(12), 'com.fresh')
+  assert.equal(name(12 + 288), 'com.lib')
+  assert.equal(out.length, arsc.length)
+  assert.equal(renameResourcePackage(arsc, 'com.other', 'com.fresh'), null)
+})
