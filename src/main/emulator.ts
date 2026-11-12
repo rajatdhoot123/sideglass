@@ -21,10 +21,16 @@ export interface PhoneSpec {
   port: number
 }
 
-/** The phone apps run on, with all traffic through the proxy. Google APIs images allow adb root. */
-export const CAPTURE_PHONE: PhoneSpec = { avd: 'sideglass_api35', tag: 'google_apis', port: 5590 }
-/** A normal phone with the Play Store, used only to download apps with the user's own account. */
-export const PLAY_PHONE: PhoneSpec = { avd: 'sideglass_play_api35', tag: 'google_apis_playstore', port: 5592 }
+/**
+ * The only virtual phone: a Play Store image booted with a Magisk-patched ramdisk, so it has
+ * both the Play Store and root. Reuses the signed-in Play phone from the earlier two-phone flow.
+ */
+export const CAPTURE_PHONE: PhoneSpec = { avd: 'sideglass_play_api35', tag: 'google_apis_playstore', port: 5590 }
+
+/** Path of the phone's stock ramdisk inside the SDK system image. */
+export function ramdiskOf(sdk: Sdk, spec: PhoneSpec): string {
+  return join(sdk.root, 'system-images', `android-${API_LEVEL}`, spec.tag, IMAGE_ABI, 'ramdisk.img')
+}
 
 export const imageOf = (spec: PhoneSpec) => `system-images;android-${API_LEVEL};${spec.tag};${IMAGE_ABI}`
 
@@ -162,15 +168,19 @@ export interface RunningEmulator {
 /**
  * Start a phone with no window (Sideglass draws the screen itself). With [proxyPort], all of
  * its TCP traffic goes through the capture proxy. Reuses it if already running.
- * [forceColdBoot] skips the quick-boot snapshot once. Userdata is kept.
+ * The fifth argument is `true` to skip the quick-boot snapshot once, or a Magisk ramdisk
+ * path. A ramdisk is never reused from a process that is already up: that process booted
+ * without it. Userdata is kept.
  */
 export async function startEmulator(
   sdk: Sdk,
   spec: PhoneSpec,
   log: Log,
   proxyPort?: number,
-  forceColdBoot = false,
+  boot?: boolean | string,
 ): Promise<RunningEmulator> {
+  const ramdisk = typeof boot === 'string' ? boot : undefined
+  const forceColdBoot = boot === true || Boolean(ramdisk)
   const serial = `emulator-${spec.port}`
   const running = await Adb.devices(sdk.adb)
   const existing = running.find((d) => d.serial === serial)
@@ -186,8 +196,11 @@ export async function startEmulator(
     return { serial, process: null, adb, coldBoot: false }
   }
   if (existing) {
-    // A running helper can still be the boot where Play Store was disabled.
-    log(`Restarting ${serial} to apply the Play Store configuration…`)
+    log(
+      ramdisk
+        ? `Restarting ${serial} so it boots the Magisk ramdisk…`
+        : `Restarting ${serial} to apply the Play Store configuration…`,
+    )
     await new Adb(sdk.adb, serial).exec(['emu', 'kill']).catch(() => undefined)
   }
   if ((await Adb.devices(sdk.adb)).some((device) => device.serial === serial) || avdLocked(spec)) {
@@ -198,7 +211,8 @@ export async function startEmulator(
   const coldBoot = forceColdBoot || configChanged || (play && !playStoreRuntimeEnabled(spec))
   log(`Starting ${spec.avd} on ${serial}...`)
   const args = ['-avd', spec.avd, '-port', String(spec.port), '-no-window', '-no-boot-anim', '-no-audio', '-gpu', 'auto']
-  if (coldBoot) args.push('-no-snapshot-load')
+  if (ramdisk) args.push('-ramdisk', ramdisk, '-no-snapshot')
+  else if (coldBoot) args.push('-no-snapshot-load')
   // The capture phone always cold-boots into a clean state; the Play phone keeps its sign-in.
   // -writable-system keeps the Play Store that replaces the LicenseChecker stub.
   if (proxyPort) args.push('-no-snapshot-save', '-writable-system', '-http-proxy', `http://127.0.0.1:${proxyPort}`)

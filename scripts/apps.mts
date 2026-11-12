@@ -1,10 +1,10 @@
-// Headless check of the app sources. Uses emulator-5590 (capture) and starts emulator-5592 (Play).
-// A fresh Play phone has no Google sign-in, so an F-Droid app installed on it stands in for a Play install.
+// Headless check of the app sources against emulator-5590 (the capture phone).
+// F-Droid installs directly; the Play flow installs on the capture phone itself.
 import { join } from 'node:path'
 import { Adb } from '../src/main/adb'
 import { findSdk } from '../src/main/sdk'
 import { installFromFdroid, search } from '../src/main/store/fdroid'
-import { apkPaths, installApks } from '../src/main/store/apk'
+import { apkPaths } from '../src/main/store/apk'
 import { packageFromPlayLink, PlayHelper } from '../src/main/store/play'
 
 const sdk = findSdk()!
@@ -17,14 +17,11 @@ console.log('F-Droid install NewPipe:', await installFromFdroid(capture, 'org.sc
 
 const pkg = packageFromPlayLink('https://play.google.com/store/apps/details?id=org.wikipedia&hl=en_IN')!
 console.log('Play link ->', pkg)
-const play = new PlayHelper(sdk, join(process.cwd(), '.smoke-data', 'scrcpy'))
+const play = new PlayHelper(capture)
 play.on('log', log)
-const playAdb = await play.start()
+play.on('stage', (s) => console.log('  stage:', s.stage, '-', s.message))
 await capture.shell(`pm uninstall ${pkg}`).catch(() => '')
-if (!(await apkPaths(playAdb, pkg)).length) await installFromFdroid(playAdb, pkg, join(dir, 'fdroid'), log)
-console.log('  already on Play phone:', await play.open(pkg))
-const apks = await play.waitAndPull(pkg, join(dir, 'play'), 60_000)
-console.log('  pulled', apks.length, 'APK file(s)')
-console.log('  install on capture phone:', await installApks(capture, apks))
-console.log('  on capture phone:', (await apkPaths(capture, pkg)).length > 0)
-await play.stop()
+console.log('already installed:', await play.open(pkg))
+await play.waitAndInstall(pkg, () => false, 60_000)
+console.log('on capture phone:', (await apkPaths(capture, pkg)).length > 0)
+process.exit(0)

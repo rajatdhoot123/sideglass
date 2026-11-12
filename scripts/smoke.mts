@@ -10,7 +10,13 @@ session.on('progress', (p) => console.log(`[${p.state}] ${p.step}: ${p.message}`
 session.on('setup-log', (l) => console.log(`   ${l}`))
 
 const keep = process.argv.includes('--keep')
-await session.start()
+try {
+  await session.start()
+} catch (error) {
+  console.error(error)
+  await session.stop().catch(() => undefined)
+  process.exit(1)
+}
 let frames = 0
 session.on('frame', () => frames++)
 const adb = session.emulator!.adb

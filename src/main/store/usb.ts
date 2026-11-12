@@ -1,5 +1,5 @@
 import { Adb } from '../adb'
-import { CAPTURE_PHONE, PLAY_PHONE } from '../emulator'
+import { CAPTURE_PHONE } from '../emulator'
 
 export interface UsbPhone {
   serial: string
@@ -9,7 +9,7 @@ export interface UsbPhone {
 }
 
 /** Sideglass's own virtual phones; they are chosen as "Virtual phone", not as a connected device. */
-const OWN = new Set([CAPTURE_PHONE.port, PLAY_PHONE.port].map((port) => `emulator-${port}`))
+const OWN = new Set([CAPTURE_PHONE.port].map((port) => `emulator-${port}`))
 
 /**
  * Devices Sideglass can use without root: real phones over USB (or Wi-Fi adb), then any other
