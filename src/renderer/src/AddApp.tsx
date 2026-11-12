@@ -215,7 +215,7 @@ function Usb({ note, onInstalled }: Props) {
             <select value={serial} onChange={(e) => setSerial(e.target.value)}>
               {phones.map((p) => (
                 <option key={p.serial} value={p.serial}>
-                  {p.model} ({p.serial})
+                  {p.model} ({p.emulator ? 'emulator, ' : ''}{p.serial})
                 </option>
               ))}
             </select>

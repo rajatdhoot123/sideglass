@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
 import { CAPTURE_PHONE, ensureAvd, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
 import { installApks, isPackageName, pullApp } from './store/apk'
+import { cloneApp, type CloneOptions, type CloneResult } from './clone'
 import { hasPlayStore, installPlayStore, needsPlayLicense, pullPlayStore } from './playstore'
 import { FEATURED, installFromFdroid, search as searchFdroid } from './store/fdroid'
 import { packageFromPlayLink, PlayHelper } from './store/play'
@@ -121,13 +122,13 @@ export class Session extends EventEmitter {
       const phones = await usbPhones(sdk.adb)
       if (!phones.length) {
         throw new Error(
-          'No phone found. Connect it with a USB cable, turn on USB debugging (Settings → Developer options) and allow this computer on the phone.',
+          'No phone found. Connect it with a USB cable, turn on USB debugging (Settings → Developer options) and allow this computer on the phone, or start another emulator.',
         )
       }
       const wanted = this.settings.usbSerial
       const phone = phones.find((p) => p.serial === wanted) ?? phones[0]
       if (wanted && phone.serial !== wanted) this.log(`${wanted} is not connected; using ${phone.model} instead`)
-      this.log(`Using ${phone.model} (${phone.serial})`)
+      this.log(`Using ${phone.model} (${phone.serial}${phone.emulator ? ', emulator' : ''})`)
       return new Adb(sdk.adb, phone.serial)
     })
     await this.step('route', "Routing the phone's traffic through Sideglass", async () => {
@@ -297,6 +298,19 @@ export class Session extends EventEmitter {
     const result = await installApks(this.requireAdb(), apks)
     this.emit('store-log', `${pkg}: ${result}`)
     return result
+  }
+
+  private cloning: string | null = null
+
+  /** Install a copy of an installed app under a new package and name, next to the original. */
+  async cloneApp(options: CloneOptions): Promise<CloneResult> {
+    if (this.cloning) throw new Error(`Already cloning ${this.cloning}. Wait for it to finish.`)
+    this.cloning = options.pkg
+    try {
+      return await cloneApp(this.requireAdb(), this.sdk!, this.dataDir, options, (l) => this.emit('store-log', l))
+    } finally {
+      this.cloning = null
+    }
   }
 
   async packages(): Promise<string[]> {

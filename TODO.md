@@ -58,6 +58,10 @@ src/main/            Electron main process (Node)
   store/play.ts      PlayHelper: second phone, open market:// link, wait for install, pull splits.
                      Copies onto the capture phone are installed as coming from Google Play
   store/usb.ts       list USB phones and their user apps
+  clone/             Clone app: axml.ts edits the binary manifest (package, class names, authorities,
+                     permissions, label); code.ts renames the same names in the dex via apktool (only
+                     when the dex has them); zip.ts re-packs the APK byte for byte; index.ts pulls, patches,
+                     zipaligns, signs with userData/data/signing/clone-key.pk8 and installs next to the original
 src/preload/index.ts contextBridge `window.api`
 src/shared.ts        Api type shared by preload and renderer
 src/renderer/src/    React UI: App, Setup, Requests, Logs, Refused, Phone, DeviceScreen, AddApp, styles.css

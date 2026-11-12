@@ -10,8 +10,10 @@ left; the phone is on the right, and you click and drag on it to use it.
 
 ## What works (v0.1)
 
-- **Choose your phone** on first run (change it later with ⚙):
+- **Choose your phone** on first run. Switch any time from the device menu in the top bar (or ⚙):
   - **Virtual phone:** Sideglass's own rooted emulator. Full HTTPS capture for every app.
+  - **Another emulator:** any emulator already running on this computer is listed too, and works like a
+    USB phone (no root needed).
   - **My phone over USB:** your own phone, no root, only USB debugging. Its traffic goes over the
     cable to Sideglass; quitting Sideglass puts the phone's proxy setting back. You see every host
     an app talks to, but HTTPS contents only for apps that trust user certificates (Chrome, or a
@@ -39,6 +41,15 @@ left; the phone is on the right, and you click and drag on it to use it.
   - **From my phone:** pick an app on a USB-connected phone (USB debugging on) to copy it over.
   - **APK file:** drop APKs on the phone (split APKs together).
 - **Launch** an installed app from the list.
+- **Clone app:** pick an installed app, give it a new package name and name, and Sideglass installs
+  a second copy next to the original (base and split APKs). The binary manifest is rewritten: package,
+  relative class names, provider authorities, the app's own permissions and the launcher label.
+  Names the code also has written in (such as a provider that checks its authority starts with the
+  package name) are renamed in the dex files too, with [apktool](https://apktool.org) (Apache-2.0,
+  downloaded on first use; needs Java). The copy is signed with a Sideglass key, made once, using the
+  SDK build-tools (`zipalign`, `apksigner`, downloaded if missing). Apps that check their own
+  signature, Google sign-in, Play licensing or Play Integrity may refuse to run as a clone. Push
+  notifications (FCM) need the new package added to the app's Firebase project.
 - **Apps that check their Google Play licence** (PairIP, LVL): the first launch puts the real
   Play Store on the capture phone (copied from the Play phone, kept in its writable system), so
   the app runs where its traffic is captured. Sign in to Google Play there once with the account

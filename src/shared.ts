@@ -4,8 +4,9 @@ import type { ExchangeSummary, Exchange, TlsFailure } from './main/proxy'
 import type { Progress } from './main/session'
 import type { StoreApp } from './main/store/fdroid'
 import type { UsbPhone } from './main/store/usb'
+import type { CloneOptions, CloneResult } from './main/clone'
 
-export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput }
+export type { CloneOptions, CloneResult, LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput }
 export type Device = 'capture' | 'play'
 /** Which phone Sideglass captures: its own rooted emulator, or the user's phone over USB. */
 export type PhoneMode = 'virtual' | 'usb'
@@ -76,6 +77,8 @@ export interface Api {
   pathForFile(file: File): string
   apps(): Promise<string[]>
   launch(pkg: string): Promise<LaunchResult>
+  /** Install a renamed, re-signed copy of an installed app next to the original. */
+  cloneApp(options: CloneOptions): Promise<CloneResult>
   sendSms(device: Device, from: string, text: string): Promise<void>
   exportHar(): Promise<string | null>
   on(channel: 'progress', cb: (p: Progress) => void): () => void
