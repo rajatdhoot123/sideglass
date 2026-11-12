@@ -29,7 +29,8 @@ left; the phone is on the right, and you click and drag on it to use it.
 - **Timeline:** each tap, swipe, key and typed text, opened to the requests that followed within
   two seconds. Export HAR keeps that timeline in `_sideglass`.
 - **Refused TLS:** hosts that rejected our certificate, which usually means certificate
-  pinning.
+  pinning. On the rooted virtual phone, **Unpin** (or **Retry with unpinning**) restarts
+  that app under Frida so those calls can be read.
 - **Phone:** live H.264 video; press, drag, long-press, scroll, and type with the keyboard.
   If the video stream cannot start, it falls back to screenshots (click = tap, drag = swipe).
 - **Add apps** (the **+ Add app** button):
@@ -40,7 +41,14 @@ left; the phone is on the right, and you click and drag on it to use it.
     third-party APK sites.
   - **From my phone:** pick an app on a USB-connected phone (USB debugging on) to copy it over.
   - **APK file:** drop APKs on the phone (split APKs together).
-- **Launch** an installed app from the list.
+- **Launch** an installed app from the list. **Unpin** spawns it with Frida so certificate
+  pinning does not hide its HTTPS calls when Hooks are off. The script is Sideglass's own.
+- **Requests tools:** copy as cURL, replay, edit and replay, block a URL, or answer it with a
+  mock body. Load a `.proto` to decode a protobuf or gRPC body with a schema.
+- **Saved sessions:** captures are kept in a local SQLite file. Search them, open one, or open
+  a HAR file.
+- **Storage:** databases and shared preferences of the launched app, on a rooted phone or a
+  debuggable app.
 - **Launch hooks** (the **Hooks** switch on the virtual phone, on by default): the app starts through
   [Frida](https://frida.re) and gets an agent before its first line runs. The agent trusts the Sideglass
   CA, drops certificate pinning (Java TLS and native BoringSSL), hides common root, emulator and injection
@@ -58,10 +66,8 @@ left; the phone is on the right, and you click and drag on it to use it.
   SDK build-tools (`zipalign`, `apksigner`, downloaded if missing). Apps that check their own
   signature, Google sign-in, Play licensing or Play Integrity may refuse to run as a clone. Push
   notifications (FCM) need the new package added to the app's Firebase project.
-- **Apps that check their Google Play licence** (PairIP, LVL): the first launch puts the real
-  Play Store on the capture phone (copied from the Play phone, kept in its writable system), so
-  the app runs where its traffic is captured. Sign in to Google Play there once with the account
-  that has the app.
+- **Apps that check their Google Play licence** (PairIP, LVL): the capture phone is a Play Store
+  image. Sign in to Google Play there once with the account that has the app.
 - **Logs:** logcat, filtered to the launched app.
 - **Test SMS:** send an SMS from any sender to the phone.
 - **Export HAR** for Chrome DevTools, Charles, Insomnia and the like.
@@ -74,7 +80,10 @@ hardware virtualisation on. Apple Silicon and x86_64 both work.
 
 ```bash
 npm install
+node node_modules/electron/install.js   # npm 11 does not run install scripts
+node node_modules/frida/scripts/install.js
 npm run dev        # development, with hot reload
+npm test
 npm run smoke      # headless check: boot, trust, open a page, expect it captured
 ```
 
@@ -91,12 +100,12 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 | Trust | A generated CA, mounted over `/system/etc/security/cacerts` and `/apex/com.android.conscrypt/cacerts` on a tmpfs; nothing on the system image changes |
 | Launch hooks | [Frida](https://frida.re) server pushed to the virtual phone on first hooked launch (pinned version, non-standard port) and our own agent (`src/main/agent.ts`) |
 | Screen | [scrcpy](https://github.com/Genymobile/scrcpy) server (Apache-2.0, downloaded on first use) via [Tango](https://tangoadb.dev/scrcpy/) (MIT): H.264, decoded with WebCodecs. Screenshots if the stream cannot start |
+| Unpinning | [Frida](https://frida.re) 17.26.2 (wxWindows Library Licence). `frida-server` is downloaded on first use. The host library runs in a Node child process, because Electron's Node ABI is different. The unpinning script is original; the HTTP Toolkit script is AGPL and is not included |
 
 ## Limits
 
-- Google Play system images cannot be rooted, so apps are downloaded on a separate Play phone.
-  The first launch of an app that checks a Play licence copies that Play Store onto the capture
-  phone. Paid apps and apps Google does not offer on the Play phone cannot be fetched.
+- The virtual phone is a Play Store image rooted with Magisk. Paid apps and apps Google does
+  not offer on that image cannot be installed.
 - Signing in to Google Play on the capture phone goes through the capture proxy. A host that
   refuses the proxy shows under Refused TLS and the sign-in cannot finish until that is bypassed.
 - Play Integrity verdicts that an app's server verifies with Google cannot be changed from the phone.
@@ -107,12 +116,15 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 - The virtual phone has Bluetooth switched off: the emulator's Bluetooth simulation does not
   always start on a boot, and Android would then pop a "Bluetooth keeps stopping" dialog every
   few seconds. Nothing Sideglass captures needs Bluetooth.
-- gRPC and protobuf bodies are shown as a field tree without a schema. A `.proto` file cannot be loaded yet.
+- gRPC and protobuf bodies are shown as a field tree. Load a `.proto` to decode with a schema.
+- A downloadable build is configured (`electron-builder.yml`, unsigned). macOS users run
+  `xattr -cr /Applications/Sideglass.app` after copying it out of the disk image. Windows
+  SmartScreen warns until the app is signed. Windows itself has not been run.
 
 ## Roadmap
 
 1. Harden the hook agent: Flutter pinning, per-app script choices
-2. Persist sessions, replay a request, and a downloadable release
+2. Code signing and a Windows run of the unsigned release
 
 ## License
 

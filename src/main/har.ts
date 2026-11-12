@@ -54,3 +54,67 @@ export function toHar(exchanges: Exchange[], inputs: PhoneInput[] = []): object 
     },
   }
 }
+
+interface HarHeader {
+  name: string
+  value: string
+}
+interface HarEntry {
+  startedDateTime?: string
+  time?: number
+  request?: {
+    method?: string
+    url?: string
+    httpVersion?: string
+    headers?: HarHeader[]
+    bodySize?: number
+    postData?: { text?: string }
+  }
+  response?: {
+    status?: number
+    statusText?: string
+    headers?: HarHeader[]
+    content?: { size?: number; mimeType?: string; text?: string }
+  }
+  _sideglass?: { app?: string; inputId?: string }
+}
+
+/** Entries from a HAR 1.2 file, so an exported capture can be opened again. */
+export function fromHar(text: string): Exchange[] {
+  const parsed = JSON.parse(text) as { log?: { entries?: HarEntry[] } }
+  return (parsed.log?.entries ?? []).map((entry, index) => {
+    const url = entry.request?.url ?? ''
+    let host = ''
+    let path = url
+    try {
+      const parsedUrl = new URL(url)
+      host = parsedUrl.host
+      path = parsedUrl.pathname + parsedUrl.search
+    } catch {
+      // Keep the raw URL when it is not absolute.
+    }
+    const requestBody = entry.request?.postData?.text
+    return {
+      id: `har-${index}-${entry.startedDateTime ?? index}`,
+      startedAt: Date.parse(entry.startedDateTime ?? '') || Date.now(),
+      method: entry.request?.method ?? 'GET',
+      url,
+      host,
+      path,
+      httpVersion: (entry.request?.httpVersion ?? 'HTTP/1.1').replace(/^HTTP\//, ''),
+      requestHeaders: Object.fromEntries((entry.request?.headers ?? []).map((header) => [header.name, header.value])),
+      requestBody,
+      requestBodySize: entry.request?.bodySize ?? requestBody?.length ?? 0,
+      status: entry.response?.status,
+      statusMessage: entry.response?.statusText,
+      responseHeaders: Object.fromEntries((entry.response?.headers ?? []).map((header) => [header.name, header.value])),
+      responseBody: entry.response?.content?.text,
+      responseBodySize: entry.response?.content?.size,
+      durationMs: entry.time,
+      state: 'done',
+      contentType: entry.response?.content?.mimeType,
+      app: entry._sideglass?.app,
+      inputId: entry._sideglass?.inputId,
+    }
+  })
+}

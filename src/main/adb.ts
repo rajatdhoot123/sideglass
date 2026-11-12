@@ -11,7 +11,7 @@ export function shellQuote(command: string): string {
 /** Thin wrapper over the adb binary for one device. */
 export class Adb {
   constructor(
-    private readonly adbPath: string,
+    readonly adbPath: string,
     readonly serial: string,
   ) {}
 

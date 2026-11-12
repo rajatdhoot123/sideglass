@@ -6,9 +6,10 @@ import { Requests } from './Requests'
 import { Logs } from './Logs'
 import { Refused } from './Refused'
 import { Setup } from './Setup'
+import { Storage } from './Storage'
 import { Timeline } from './Timeline'
 
-type Tab = 'requests' | 'timeline' | 'logs' | 'refused'
+type Tab = 'requests' | 'timeline' | 'logs' | 'refused' | 'storage'
 
 export function App() {
   const [progress, setProgress] = useState<Record<string, Progress>>({})
@@ -24,6 +25,9 @@ export function App() {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [activeDevice, setActiveDevice] = useState<Device>('capture')
+  const [unpinRequest, setUnpinRequest] = useState<{ pkg: string; n: number } | null>(null)
+  const [protoTypes, setProtoTypes] = useState<string[]>([])
+  const [archive, setArchive] = useState<ExchangeSummary[] | null>(null)
   const ready = progress.ready?.state === 'done'
 
   /** Save the phone choice and start a fresh session with it. */
@@ -54,7 +58,15 @@ export function App() {
           return next
         }),
       ),
-      window.api.on('tls-failure', (f) => setRefused((prev) => [...prev.slice(-999), f])),
+      window.api.on('tls-failure', (f) =>
+        setRefused((prev) => {
+          const index = prev.findIndex((row) => row.id === f.id)
+          if (index === -1) return [...prev.slice(-999), f]
+          const next = prev.slice()
+          next[index] = f
+          return next
+        }),
+      ),
       window.api.on('logcat', (lines) => setLogs((prev) => [...prev, ...lines].slice(-5000))),
       window.api.on('input', (input) =>
         setInputs((prev) => {
@@ -119,6 +131,9 @@ export function App() {
           <button className={tab === 'refused' ? 'on' : ''} onClick={() => setTab('refused')}>
             Refused TLS <span className={refused.length ? 'count warn' : 'count'}>{refused.length}</span>
           </button>
+          <button className={tab === 'storage' ? 'on' : ''} onClick={() => setTab('storage')}>
+            Storage
+          </button>
           <div className="spacer" />
           <DeviceSwitch current={settings} onSave={(s) => void choose(s)} />
           <button
@@ -133,18 +148,41 @@ export function App() {
             Clear
           </button>
           <button onClick={() => void window.api.exportHar()}>Export HAR</button>
+          <button
+            onClick={() =>
+              void window.api.openHar().then((rows) => {
+                if (!rows) return
+                setArchive(rows)
+                setTab('requests')
+              })
+            }
+          >
+            Open HAR
+          </button>
           <button title="Settings" onClick={() => setShowSettings(true)}>
             ⚙
           </button>
         </nav>
-        {tab === 'requests' && <Requests list={list} focusApp={focusApp} />}
+        {tab === 'requests' && (
+          <Requests
+            list={archive ?? list}
+            focusApp={focusApp}
+            archived={archive != null}
+            protoTypes={protoTypes}
+            onLive={() => setArchive(null)}
+            onArchive={setArchive}
+            onLoadProto={() => void window.api.loadProto().then(setProtoTypes)}
+          />
+        )}
         {tab === 'timeline' && <Timeline inputs={inputs} requests={list} />}
         {tab === 'logs' && <Logs lines={logs} pid={appPid} />}
-        {tab === 'refused' && <Refused list={refused} />}
+        {tab === 'refused' && <Refused list={refused} onUnpin={(pkg) => setUnpinRequest({ pkg, n: Date.now() })} />}
+        {tab === 'storage' && <Storage pkg={focusApp} />}
       </section>
       <Phone
         mode={settings.phone}
         activeDevice={activeDevice}
+        unpinRequest={unpinRequest}
         onActiveDevice={setActiveDevice}
         onLaunched={(pid, pkg) => {
           setAppPid(pid)

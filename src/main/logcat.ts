@@ -12,6 +12,13 @@ export interface LogLine {
 
 const LINE = /^(\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\s+(\d+)\s+\d+\s+([VDIWEF])\s+(.*?)\s*:\s(.*)$/
 
+/** One `logcat -v threadtime` line, or null when the line is a continuation. */
+export function parseLogLine(raw: string): LogLine | null {
+  const match = LINE.exec(raw.trimEnd())
+  if (!match) return null
+  return { at: match[1], pid: Number(match[2]), level: match[3], tag: match[4], message: match[5] }
+}
+
 /** Streams `logcat -v threadtime` from now on, in small batches. */
 export class Logcat extends EventEmitter {
   private child: ChildProcess | null = null
@@ -29,8 +36,8 @@ export class Logcat extends EventEmitter {
       const lines = (rest + d.toString()).split('\n')
       rest = lines.pop() ?? ''
       for (const raw of lines) {
-        const m = LINE.exec(raw.trimEnd())
-        if (m) this.pending.push({ at: m[1], pid: Number(m[2]), level: m[3], tag: m[4], message: m[5] })
+        const line = parseLogLine(raw)
+        if (line) this.pending.push(line)
       }
     })
     this.timer = setInterval(() => {

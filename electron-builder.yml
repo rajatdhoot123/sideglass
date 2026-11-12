@@ -1,0 +1,29 @@
+appId: com.sideglass.desktop
+productName: Sideglass
+copyright: Copyright © Sideglass contributors
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+extraResources:
+  - from: scripts/frida-host.mjs
+    to: sideglass/frida-host.mjs
+  - from: scripts/frida-agent
+    to: sideglass/frida-agent
+asarUnpack:
+  - "**/node_modules/frida/**/*"
+  - "**/node_modules/frida-java-bridge/**/*"
+mac:
+  target:
+    - dmg
+  # Unsigned until an Apple Developer ID certificate is configured.
+  identity: null
+win:
+  target:
+    - nsis
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
