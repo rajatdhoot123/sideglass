@@ -140,8 +140,14 @@ button.on { border-color: var(--accent); color: var(--accent); }
 .app-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .app-text span, .app-text code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .app-text code { color: var(--muted); font-size: 11px; }
-.play { display: flex; gap: 12px; height: 100%; }
-.play-left { flex: 1; padding: 8px 12px; }
+/* Stack the instructions top to bottom; only put the Play phone beside them when it is showing. */
+.play { display: flex; flex-direction: column; gap: 12px; height: 100%; padding: 8px 12px; }
+.play:has(> .play-left) { padding: 0; }
+.play:has(> .play-right) { flex-direction: row; }
+.play > .filterbar, .play-left > .filterbar { padding: 0; border-bottom: 0; }
+.play-left { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 8px 12px; }
+.play-left > p, .play-left > ul, .play > p, .play > ul { margin: 0; }
+.play label.small { display: flex; align-items: center; gap: 6px; }
 .play-right { width: 360px; display: flex; flex-direction: column; gap: 6px; padding: 8px; background: var(--panel); }
 .small { font-size: 12px; }
 .usb-list { padding: 8px; }
