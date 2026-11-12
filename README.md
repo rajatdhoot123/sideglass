@@ -11,7 +11,7 @@ left; the phone is on the right, and you click and drag on it to use it.
 ## What works (v0.1)
 
 - **Choose your phone** on first run. Switch any time from the device menu in the top bar (or ⚙):
-  - **Virtual phone:** Sideglass's own rooted emulator. Full HTTPS capture for every app.
+  - **Virtual phone:** a Play Store emulator, rooted with Magisk, so apps install with your Google account and HTTPS is captured on the same phone.
   - **Another emulator:** any emulator already running on this computer is listed too, and works like a
     USB phone (no root needed).
   - **My phone over USB:** your own phone, no root, only USB debugging. Its traffic goes over the

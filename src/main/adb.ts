@@ -3,6 +3,11 @@ import { promisify } from 'node:util'
 
 const run = promisify(execFile)
 
+/** Single-quote a command for an inner shell (su -c, sh -c). */
+export function shellQuote(command: string): string {
+  return `'${command.replaceAll("'", `'\\''`)}'`
+}
+
 /** Thin wrapper over the adb binary for one device. */
 export class Adb {
   constructor(
@@ -56,15 +61,13 @@ export class Adb {
     throw new Error(`${this.serial} did not finish booting in ${timeoutMs / 1000}s`)
   }
 
-  /** Restart adbd as root. Works on Google APIs (userdebug) images, not Play Store images. */
-  async root(): Promise<void> {
-    const out = await this.exec(['root']).catch((e: Error) => e.message)
-    if (/cannot run as root/i.test(out)) {
-      throw new Error('This emulator image cannot run as root. Use a Google APIs image, not Google Play.')
-    }
-    await this.exec(['wait-for-device'])
-    const id = (await this.shell('id -u')).trim()
-    if (id !== '0') throw new Error(`adb root did not take effect (uid ${id})`)
+  /**
+   * Run a command as root through Magisk's su (the capture phone is a Play Store image,
+   * where `adb root` does not exist). The command is passed to su as one string; quote
+   * nested quotes with shellQuote().
+   */
+  async su(command: string, timeoutMs?: number): Promise<string> {
+    return this.shell(`su -c ${shellQuote(command)}`, timeoutMs)
   }
 
   /** `adb remount`; returns stdout and stderr together, since adb splits its messages across both. */

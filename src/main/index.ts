@@ -86,7 +86,7 @@ ipcMain.handle('capture:clear', () => {
   current.timeline.clear()
 })
 type Device = 'capture' | 'play'
-const screenOf = (device: Device) => (device === 'play' ? requireSession().play?.screen : requireSession().screen)
+const screenOf = (_device: Device) => requireSession().screen
 const point = (device: Device, x: number, y: number) => {
   const size = screenOf(device)?.frames.size ?? { width: 1080, height: 2400 }
   return `${Math.round(x * size.width)},${Math.round(y * size.height)}`
@@ -162,7 +162,7 @@ ipcMain.handle('screen:refresh', (_, device: Device) => screenOf(device)?.refres
 ipcMain.handle('screen:frames', (_, device: Device) => screenOf(device)?.useFrames())
 ipcMain.handle('screen:state', () => ({
   capture: requireSession().screen?.mode ?? 'frames',
-  play: requireSession().play?.screen?.mode ?? 'frames',
+  play: requireSession().screen?.mode ?? 'frames',
 }))
 ipcMain.handle('apk:install', (_, paths: string[]) => requireSession().installApk(paths))
 ipcMain.handle('store:featured', () => requireSession().featuredApps())

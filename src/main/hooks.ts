@@ -106,12 +106,12 @@ export class Hooks {
       this.say('Starting launch hooks (frida-server)...')
 
       // Restarting is idempotent: a stale server would refuse the port.
-      await adb.shell('kill $(pidof .sgsys) 2>/dev/null; true')
+      // Play images have no adb root. Magisk su starts the server so it can inject other apps.
+      await adb.su('kill $(pidof .sgsys) 2>/dev/null; true').catch(() => undefined)
       await adb.execBuffer(['push', local, DEVICE_BIN], 120_000)
       await adb.shell(`chmod 700 ${DEVICE_BIN}`)
-      // nohup + & detaches: the adb shell call returns while the server keeps running.
       await adb
-        .exec(['shell', `nohup ${DEVICE_BIN} -l 127.0.0.1:${SERVER_PORT} >/dev/null 2>&1 &`], 10_000)
+        .su(`nohup ${DEVICE_BIN} -l 127.0.0.1:${SERVER_PORT} >/dev/null 2>&1 &`, 15_000)
         .catch(() => undefined)
       await adb.exec(['forward', `tcp:${SERVER_PORT}`, `tcp:${SERVER_PORT}`])
       await this.waitPort()

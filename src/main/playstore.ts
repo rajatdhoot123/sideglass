@@ -60,13 +60,13 @@ export async function pullPlayStore(play: Adb, cacheDir: string): Promise<PlaySt
 
 /** Replace the stub with the Play Store on a rooted phone started with -writable-system. */
 export async function installPlayStore(adb: Adb, files: PlayStoreFiles, log: (line: string) => void): Promise<void> {
-  await adb.root()
+  await adb.su('id')
   let out = await adb.remount()
   if (/reboot/i.test(out)) {
     // The first remount turns on the overlay, which applies after a reboot.
     log('Enabling a writable system on the capture phone (reboot)…')
     await adb.reboot()
-    await adb.root()
+    await adb.su('id')
     out = await adb.remount()
   }
   if (!/remount succeeded/i.test(out)) {
