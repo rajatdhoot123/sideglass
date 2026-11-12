@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Adb } from './adb'
 
@@ -19,7 +20,10 @@ import type { Adb } from './adb'
  */
 
 export const MAGISK_VERSION = 'v31.1'
-const MAGISK_APK_SIZE = 10_679_283
+/** Official Magisk-v31.1.apk digest from the GitHub release. */
+const MAGISK_APK_SHA256 = '89cefac0a318afa39fb3880c45c87b036c05bc1ebf02a7a715b7f8d7c26ac6e7'
+/** A patched ramdisk is a gzip image well above a truncated pull. */
+const MIN_RAMDISK_BYTES = 256 * 1024
 
 export const MAGISK_PACKAGE = 'com.topjohnwu.magisk'
 const APK_URL = `https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VERSION}/Magisk-${MAGISK_VERSION}.apk`
@@ -49,6 +53,18 @@ export function cachedRamdiskPath(dataDir: string, sourceRamdisk: string): strin
   return join(magiskDir(dataDir), `ramdisk-${MAGISK_VERSION}-${st.size}-${st.mtimeMs}.img`)
 }
 
+/** True when [path] is a complete gzip image, not a pull that died mid-write. */
+export function ramdiskUsable(path: string): boolean {
+  if (!existsSync(path) || statSync(path).size < MIN_RAMDISK_BYTES) return false
+  const fd = openSync(path, 'r')
+  try {
+    const head = Buffer.alloc(2)
+    return readSync(fd, head, 0, 2, 0) === 2 && head[0] === 0x1f && head[1] === 0x8b
+  } finally {
+    closeSync(fd)
+  }
+}
+
 /** Is the Magisk manager app installed on the phone? */
 export async function magiskAppInstalled(adb: Adb): Promise<boolean> {
   const out = await adb.shell(`pm path ${MAGISK_PACKAGE}`).catch(() => '')
@@ -63,6 +79,17 @@ export async function magiskAppInstalled(adb: Adb): Promise<boolean> {
 export async function disablePlayProtectScans(adb: Adb): Promise<void> {
   await adb.shell('settings put global package_verifier_enable 0').catch(() => undefined)
   await adb.shell('settings put global verifier_verify_adb_installs 0').catch(() => undefined)
+}
+
+/**
+ * The emulator's host-side Bluetooth simulation (netsim) is not always available on a boot
+ * — a stale netsimd can keep holding the packet-streamer port — and then the guest Bluetooth
+ * stack finds no HCI controller and crash-loops with a "Bluetooth keeps stopping" dialog
+ * (SIGABRT in bt_stack_manage, "Can't start stack ... starting HciHal"). A capture phone has
+ * no use for Bluetooth, so its package is switched off; the disable survives reboots.
+ */
+export async function disableBluetoothStack(adb: Adb): Promise<void> {
+  await adb.shell('pm disable-user --user 0 com.android.bluetooth').catch(() => undefined)
 }
 
 /**
@@ -88,22 +115,33 @@ async function openMagiskApp(adb: Adb, apk: string, log: (l: string) => void): P
   throw new Error('The Magisk app would not start. Reinstall it manually and retry.')
 }
 
-/** Download the release APK once and extract the binaries the patch needs. */
-export async function ensureArtifacts(dataDir: string, log: (l: string) => void, abi = 'arm64-v8a'): Promise<MagiskArtifacts> {
+function sha256(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+/** Download the release APK once and extract the binaries the patch needs for [abi]. */
+export async function ensureArtifacts(dataDir: string, log: (l: string) => void, abi: string): Promise<MagiskArtifacts> {
   const dir = magiskDir(dataDir)
   mkdirSync(dir, { recursive: true })
   const apk = join(dir, `Magisk-${MAGISK_VERSION}.apk`)
-  if (!existsSync(apk) || statSync(apk).size < MAGISK_APK_SIZE - 1_000_000) {
+  const apkOk = existsSync(apk) && sha256(readFileSync(apk)) === MAGISK_APK_SHA256
+  if (!apkOk) {
     log(`Downloading Magisk ${MAGISK_VERSION} (about 11 MB)...`)
     const response = await fetch(APK_URL)
     if (!response.ok) throw new Error(`Magisk download failed: HTTP ${response.status}`)
     const buf = Buffer.from(await response.arrayBuffer())
-    if (buf.length < MAGISK_APK_SIZE - 1_000_000) throw new Error('Magisk APK download is suspiciously small')
+    if (sha256(buf) !== MAGISK_APK_SHA256) {
+      throw new Error(`Magisk ${MAGISK_VERSION} download did not match the published SHA-256`)
+    }
     writeFileSync(apk, buf)
+    for (const name of readdirSync(dir)) {
+      if (name.startsWith('bin-')) rmSync(join(dir, name), { recursive: true, force: true })
+    }
   }
   const bin = join(dir, `bin-${abi}`)
   const missing = Object.values(APK_LIBS).filter((name) => !existsSync(join(bin, name)))
   if (missing.length || !existsSync(bin)) {
+    rmSync(bin, { recursive: true, force: true })
     mkdirSync(bin, { recursive: true })
     const result = spawnSync('unzip', ['-o', '-q', apk, `lib/${abi}/*`, '-d', dir], { timeout: 120_000 })
     if (result.status !== 0) throw new Error(`Could not unzip the Magisk APK (is unzip installed?): ${result.stderr}`)
@@ -125,11 +163,11 @@ export async function patchedRamdisk(
   dataDir: string,
   sourceRamdisk: string,
   log: (l: string) => void,
-  abi = 'arm64-v8a',
+  abi: string,
 ): Promise<string> {
-  const st = statSync(sourceRamdisk)
   const target = cachedRamdiskPath(dataDir, sourceRamdisk)
-  if (existsSync(target)) return target
+  if (ramdiskUsable(target)) return target
+  rmSync(target, { force: true })
 
   const artifacts = await ensureArtifacts(dataDir, log, abi)
   const remote = '/data/local/tmp/.sgmagisk'
@@ -144,7 +182,17 @@ export async function patchedRamdisk(
   await adb.shell(`chmod 755 ${remote}/busybox ${remote}/magisk ${remote}/magiskinit ${remote}/magiskboot ${remote}/init-ld ${remote}/patch.sh`)
   const out = await adb.shell(`ASH_STANDALONE=1 ${remote}/busybox sh ${remote}/patch.sh`, 180_000)
   if (!out.includes('SIDEGLASS_MAGISK_PATCH_OK')) throw new Error(`ramdisk patch failed:\n${out}`)
-  await adb.exec(['pull', `${remote}/ramdisk-magisk.img`, target])
+  const partial = `${target}.part`
+  rmSync(partial, { force: true })
+  try {
+    await adb.exec(['pull', `${remote}/ramdisk-magisk.img`, partial])
+    if (!ramdiskUsable(partial)) throw new Error('Patched ramdisk is incomplete')
+    renameSync(partial, target)
+  } catch (error) {
+    rmSync(partial, { force: true })
+    rmSync(target, { force: true })
+    throw error
+  }
   await adb.shell(`rm -rf ${remote}`)
   log('Ramdisk patched')
   return target
@@ -264,7 +312,12 @@ export async function grantSu(
       continue
     }
 
-    // Superuser tab, empty state: open the grant list via the floating ＋.
+    // Superuser tab: the add control is the FAB labelled "Grant Superuser".
+    if (await tapByText(adb, xml, 'Grant Superuser')) {
+      log('Opened the grant list')
+      await sleep(2500)
+      continue
+    }
     if (/No apps have asked for Superuser permission yet/.test(xml)) {
       const add = pickAddButton(xml)
       if (add) {
@@ -353,12 +406,7 @@ async function tapByText(adb: Adb, xml: string, text: string): Promise<boolean> 
   return false
 }
 
-/**
- * The floating ＋ on the Superuser tab. Compose gives it no resource-id, so find it by
- * geometry: first locate the bottom navigation (three or more clickables sharing one
- * vertical band near the bottom), then take the clickable furthest to the bottom right
- * above that band.
- */
+/** Geometric fallback for the Superuser ＋ when its "Grant Superuser" label is missing. */
 function pickAddButton(xml: string): Point | null {
   const nodes = [...xml.matchAll(/<node [^>]*>/g)].map((m) => m[0])
   // Screen size from the root frame (some dumps give <hierarchy> no bounds attribute).
@@ -372,7 +420,8 @@ function pickAddButton(xml: string): Point | null {
     .filter((b): b is RegExpExecArray => b !== null)
     .map((b) => ({ x1: Number(b[1]), y1: Number(b[2]), x2: Number(b[3]), y2: Number(b[4]) }))
   // Bottom navigation: a band holding three or more clickables in the lower quarter.
-  let navTop = height
+  // If that band is not detected, still ignore the bottom strip so a nav tab cannot win.
+  let navTop = height * 0.9
   const bands = new Map<string, number>()
   for (const it of items) {
     const midY = (it.y1 + it.y2) / 2
@@ -384,7 +433,6 @@ function pickAddButton(xml: string): Point | null {
     if (count < 3) continue
     navTop = Math.min(navTop, Number(key.split('-')[0]))
   }
-  // The ＋ is the clickable furthest to the bottom right above that band.
   let best: { at: Point; score: number } | null = null
   for (const it of items) {
     const midY = (it.y1 + it.y2) / 2
