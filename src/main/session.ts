@@ -17,11 +17,13 @@ import { cloneApp, type CloneOptions, type CloneResult } from './clone'
 import { hasPlayStore, needsPlayLicense } from './playstore'
 import {
   cachedRamdiskPath,
+  disableBluetoothStack,
   disablePlayProtectScans,
   ensureArtifacts,
   grantSu,
   magiskAppInstalled,
   patchedRamdisk,
+  ramdiskUsable,
   suGranted,
 } from './magisk'
 import { FEATURED, installFromFdroid, search as searchFdroid } from './store/fdroid'
@@ -144,7 +146,9 @@ export class Session extends EventEmitter {
   private async startVirtual(sdk: Sdk, ca: CaFiles, port: number): Promise<Adb> {
     await this.step('avd', 'Preparing virtual phone', () => ensureAvd(sdk, CAPTURE_PHONE, this.log))
     const stock = ramdiskOf(sdk, CAPTURE_PHONE)
-    const cached = existsSync(stock) ? cachedRamdiskPath(this.dataDir, stock) : ''
+    const cachedFile = existsSync(stock) ? cachedRamdiskPath(this.dataDir, stock) : ''
+    const cached = cachedFile && ramdiskUsable(cachedFile) ? cachedFile : ''
+    let bootedWithRamdisk = false
     let emu = await this.step('boot', 'Booting virtual phone', async () => {
       // Only adopt a phone this app booted (see emulator.json): one started by hand or left
       // by another tool has no capture proxy, and its traffic would never reach us.
@@ -156,16 +160,19 @@ export class Session extends EventEmitter {
       const running = (await Adb.devices(sdk.adb)).some((d) => d.serial === serial && d.state === 'device')
       if (running && record?.proxyPort !== port) {
         this.log('The running phone was not started for this session — restarting it with capture routing...')
-        await new Adb(sdk.adb, serial).exec(['emu', 'kill']).catch(() => undefined)
-        await new Promise((r) => setTimeout(r, 3000))
+        const stale = new Adb(sdk.adb, serial)
+        await stale.exec(['emu', 'kill']).catch(() => undefined)
+        await stale.untilGone().catch(() => undefined)
       }
-      const started = await startEmulator(sdk, CAPTURE_PHONE, this.log, port, cached && existsSync(cached) ? cached : undefined)
-      await writeFile(recordPath, JSON.stringify({ proxyPort: port, at: Date.now() })).catch(() => undefined)
+      const started = await startEmulator(sdk, CAPTURE_PHONE, this.log, port, cached || undefined)
+      bootedWithRamdisk = Boolean(cached)
+      await writeFile(recordPath, JSON.stringify({ proxyPort: port, ramdisk: bootedWithRamdisk, at: Date.now() })).catch(() => undefined)
       return started
     })
     this.emulator = emu
     await this.step('magisk', 'Setting up Magisk root', async () => {
       await disablePlayProtectScans(emu.adb)
+      await disableBluetoothStack(emu.adb)
       if (await suGranted(emu.adb)) {
         this.log('Root is available through Magisk su')
         return
@@ -175,7 +182,7 @@ export class Session extends EventEmitter {
         this.log('Installing the Magisk manager app...')
         await emu.adb.exec(['install', '-r', artifacts.apk], 300_000)
       }
-      if (!(cached && existsSync(cached))) {
+      if (!bootedWithRamdisk) {
         const patched = await patchedRamdisk(emu.adb, this.dataDir, stock, this.log, IMAGE_ABI)
         this.log('Restarting the phone with the Magisk ramdisk...')
         await stopEmulator(emu)

@@ -70,6 +70,17 @@ export class Adb {
     return this.shell(`su -c ${shellQuote(command)}`, timeoutMs)
   }
 
+  /** Resolve once `adb devices` no longer lists this serial, in any state. */
+  async untilGone(timeoutMs = 30_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const listed = (await Adb.devices(this.adbPath)).some((d) => d.serial === this.serial)
+      if (!listed) return
+      await new Promise((r) => setTimeout(r, 400))
+    }
+    throw new Error(`${this.serial} did not shut down`)
+  }
+
   /** `adb remount`; returns stdout and stderr together, since adb splits its messages across both. */
   async remount(): Promise<string> {
     const result = await run(this.adbPath, ['-s', this.serial, 'remount'], { timeout: 120_000 }).catch(

@@ -104,15 +104,18 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 
 ## Limits
 
-- Google Play system images cannot be rooted, so apps are downloaded on a separate Play phone.
-  The first launch of an app that checks a Play licence copies that Play Store onto the capture
-  phone. Paid apps and apps Google does not offer on the Play phone cannot be fetched.
+- The virtual phone is a Play Store image rooted with Magisk. Paid apps and apps Google does
+  not offer on that image cannot be installed.
 - Signing in to Google Play on the capture phone goes through the capture proxy. A host that
   refuses the proxy shows under Refused TLS and the sign-in cannot finish until that is bypassed.
 - Play Integrity verdicts that an app's server verifies with Google cannot be changed from the phone.
   The hooks only rewrite a verdict the app reads locally, and that refusal is named in the phone panel.
 - Some apps still detect Frida or root. The hooks hide the common checks, and a determined check can still refuse.
 - Apps that pin below the hooks still show up under Refused TLS.
+- On the virtual phone, a request is tagged with the app that owned the socket when that can be told apart. USB phones are not tagged.
+- The virtual phone has Bluetooth switched off: the emulator's Bluetooth simulation does not
+  always start on a boot, and Android would then pop a "Bluetooth keeps stopping" dialog every
+  few seconds. Nothing Sideglass captures needs Bluetooth.
 - gRPC and protobuf bodies are shown as a field tree. Load a `.proto` to decode with a schema.
 - A downloadable build is configured (`electron-builder.yml`, unsigned). macOS users run
   `xattr -cr /Applications/Sideglass.app` after copying it out of the disk image. Windows
