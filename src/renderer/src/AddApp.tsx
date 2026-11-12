@@ -1,11 +1,19 @@
 import { useEffect, useState } from 'react'
-import type { StoreApp, UsbPhone } from '../../shared'
+import type { PhoneMode, StoreApp, UsbPhone } from '../../shared'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
 
 type Source = 'store' | 'play' | 'usb' | 'file'
 
 /** Every way to get an app onto the capture phone. */
-export function AddApp({ onClose, onInstalled }: { onClose: () => void; onInstalled: (pkg?: string, open?: boolean) => void }) {
+export function AddApp({
+  mode,
+  onClose,
+  onInstalled,
+}: {
+  mode: PhoneMode
+  onClose: () => void
+  onInstalled: (pkg?: string, open?: boolean) => void
+}) {
   const [source, setSource] = useState<Source>('store')
   const [log, setLog] = useState<string[]>([])
   useEffect(() => window.api.on('store-log', (l) => setLog((prev) => [...prev.slice(-30), l])), [])
@@ -26,11 +34,14 @@ export function AddApp({ onClose, onInstalled }: { onClose: () => void; onInstal
               ['usb', 'From my phone (USB)'],
               ['file', 'APK file'],
             ] as const
-          ).map(([id, label]) => (
-            <button key={id} className={source === id ? 'on' : ''} onClick={() => setSource(id)}>
-              {label}
-            </button>
-          ))}
+          )
+            // On a real phone, the Play Store is right there, and "from my phone" is the same phone.
+            .filter(([id]) => mode === 'virtual' || (id !== 'play' && id !== 'usb'))
+            .map(([id, label]) => (
+              <button key={id} className={source === id ? 'on' : ''} onClick={() => setSource(id)}>
+                {label}
+              </button>
+            ))}
         </nav>
         <div className="modal-body">
           {source === 'store' && <Store note={note} onInstalled={onInstalled} />}
@@ -156,7 +167,7 @@ function Play({ note, onInstalled }: Props) {
         </form>
         <label className="small">
           <input type="checkbox" checked={openWhenReady} onChange={(e) => setOpenWhenReady(e.target.checked)} /> Open
-          the app on the capture phone when it is ready
+          the app when it is ready, on the phone that can run it
         </label>
         <ul className="muted small">
           <li>Sideglass taps Install for you and only stops when it needs you (sign-in, a prompt, a paid app).</li>
@@ -204,7 +215,7 @@ function Usb({ note, onInstalled }: Props) {
             <select value={serial} onChange={(e) => setSerial(e.target.value)}>
               {phones.map((p) => (
                 <option key={p.serial} value={p.serial}>
-                  {p.model} ({p.serial})
+                  {p.model} ({p.emulator ? 'emulator, ' : ''}{p.serial})
                 </option>
               ))}
             </select>

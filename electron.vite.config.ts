@@ -4,7 +4,19 @@ import { defineConfig } from 'electron-vite'
 
 export default defineConfig({
   main: {
-    build: { rollupOptions: { input: { index: resolve(__dirname, 'src/main/index.ts') }, external: ['frida'] } },
+    build: {
+      // Tango is ESM-only. Bundle it into the main process instead of require().
+      externalizeDeps: {
+        exclude: [
+          '@yume-chan/adb',
+          '@yume-chan/adb-scrcpy',
+          '@yume-chan/adb-server-node-tcp',
+          '@yume-chan/scrcpy',
+          '@yume-chan/stream-extra',
+        ],
+      },
+      rollupOptions: { input: { index: resolve(__dirname, 'src/main/index.ts') } },
+    },
   },
   preload: {
     build: { rollupOptions: { input: { index: resolve(__dirname, 'src/preload/index.ts') } } },

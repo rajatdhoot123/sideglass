@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { ExchangeSummary, LogLine, Progress, TlsFailure } from '../../shared'
+import type { Device, ExchangeSummary, LogLine, PhoneInput, Progress, Settings, TlsFailure } from '../../shared'
+import { DeviceSwitch, PhoneChoice, SettingsDialog } from './PhoneChoice'
 import { Phone } from './Phone'
 import { Requests } from './Requests'
 import { Logs } from './Logs'
 import { Refused } from './Refused'
 import { Setup } from './Setup'
+import { Timeline } from './Timeline'
 
-type Tab = 'requests' | 'logs' | 'refused'
+type Tab = 'requests' | 'timeline' | 'logs' | 'refused'
 
 export function App() {
   const [progress, setProgress] = useState<Record<string, Progress>>({})
@@ -14,9 +16,32 @@ export function App() {
   const [exchanges, setExchanges] = useState<Map<string, ExchangeSummary>>(new Map())
   const [refused, setRefused] = useState<TlsFailure[]>([])
   const [logs, setLogs] = useState<LogLine[]>([])
+  const [inputs, setInputs] = useState<PhoneInput[]>([])
   const [tab, setTab] = useState<Tab>('requests')
   const [appPid, setAppPid] = useState<number | null>(null)
+  const [focusApp, setFocusApp] = useState<string | null>(null)
+  /** null until loaded; no `phone` yet means first run: ask. */
+  const [settings, setSettings] = useState<Settings | null>(null)
+  const [showSettings, setShowSettings] = useState(false)
+  const [activeDevice, setActiveDevice] = useState<Device>('capture')
   const ready = progress.ready?.state === 'done'
+
+  /** Save the phone choice and start a fresh session with it. */
+  const choose = async (next: Settings) => {
+    const saved = await window.api.saveSettings(next)
+    setShowSettings(false)
+    setProgress({})
+    setSetupLog([])
+    setExchanges(new Map())
+    setRefused([])
+    setLogs([])
+    setInputs([])
+    setAppPid(null)
+    setFocusApp(null)
+    setActiveDevice('capture')
+    setSettings(saved)
+    void window.api.start()
+  }
 
   useEffect(() => {
     const offs = [
@@ -31,14 +56,52 @@ export function App() {
       ),
       window.api.on('tls-failure', (f) => setRefused((prev) => [...prev.slice(-999), f])),
       window.api.on('logcat', (lines) => setLogs((prev) => [...prev, ...lines].slice(-5000))),
+      window.api.on('input', (input) =>
+        setInputs((prev) => {
+          const index = prev.findIndex((row) => row.id === input.id)
+          if (index === -1) return [...prev, input].slice(-2000)
+          const next = prev.slice()
+          next[index] = input
+          return next
+        }),
+      ),
     ]
-    void window.api.start()
+    void window.api.settings().then((s) => {
+      setSettings(s)
+      if (s.phone) void window.api.start()
+    })
     return () => offs.forEach((off) => off())
   }, [])
 
   const list = useMemo(() => [...exchanges.values()], [exchanges])
 
-  if (!ready) return <Setup progress={progress} log={setupLog} onRetry={() => void window.api.start()} />
+  if (!settings) return null
+  if (!settings.phone) {
+    return (
+      <div className="setup">
+        <h1>Sideglass</h1>
+        <p className="muted">Which phone should Sideglass watch? You can change this later in Settings.</p>
+        <PhoneChoice initial={settings} saveLabel="Continue" onSave={(s) => void choose(s)} />
+      </div>
+    )
+  }
+  const dialog = showSettings && (
+    <SettingsDialog initial={settings} onClose={() => setShowSettings(false)} onSave={(s) => void choose(s)} />
+  )
+  if (!ready) {
+    return (
+      <>
+        <Setup
+          mode={settings.phone}
+          progress={progress}
+          log={setupLog}
+          onRetry={() => void window.api.start()}
+          onChangePhone={() => setShowSettings(true)}
+        />
+        {dialog}
+      </>
+    )
+  }
 
   return (
     <div className="app">
@@ -47,6 +110,9 @@ export function App() {
           <button className={tab === 'requests' ? 'on' : ''} onClick={() => setTab('requests')}>
             Requests <span className="count">{list.length}</span>
           </button>
+          <button className={tab === 'timeline' ? 'on' : ''} onClick={() => setTab('timeline')}>
+            Timeline <span className="count">{inputs.length}</span>
+          </button>
           <button className={tab === 'logs' ? 'on' : ''} onClick={() => setTab('logs')}>
             Logs
           </button>
@@ -54,23 +120,39 @@ export function App() {
             Refused TLS <span className={refused.length ? 'count warn' : 'count'}>{refused.length}</span>
           </button>
           <div className="spacer" />
+          <DeviceSwitch current={settings} onSave={(s) => void choose(s)} />
           <button
             onClick={async () => {
               await window.api.clear()
               setExchanges(new Map())
               setRefused([])
               setLogs([])
+              setInputs([])
             }}
           >
             Clear
           </button>
           <button onClick={() => void window.api.exportHar()}>Export HAR</button>
+          <button title="Settings" onClick={() => setShowSettings(true)}>
+            ⚙
+          </button>
         </nav>
-        {tab === 'requests' && <Requests list={list} />}
+        {tab === 'requests' && <Requests list={list} focusApp={focusApp} />}
+        {tab === 'timeline' && <Timeline inputs={inputs} requests={list} />}
         {tab === 'logs' && <Logs lines={logs} pid={appPid} />}
         {tab === 'refused' && <Refused list={refused} />}
       </section>
-      <Phone onLaunched={setAppPid} />
+      <Phone
+        mode={settings.phone}
+        activeDevice={activeDevice}
+        onActiveDevice={setActiveDevice}
+        onLaunched={(pid, pkg) => {
+          setAppPid(pid)
+          // USB capture is not tagged, so filtering to the package would hide every row.
+          if (pkg && settings.phone === 'virtual') setFocusApp(pkg)
+        }}
+      />
+      {dialog}
     </div>
   )
 }

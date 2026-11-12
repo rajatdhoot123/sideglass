@@ -1,4 +1,5 @@
 import type { Exchange } from './proxy'
+import type { PhoneInput } from './timeline'
 
 type Headers = Record<string, string | string[] | undefined>
 
@@ -8,11 +9,14 @@ const pairs = (h: Headers | undefined) =>
   )
 
 /** HAR 1.2, so captures open in Chrome DevTools, Charles, Insomnia and friends. */
-export function toHar(exchanges: Exchange[]): object {
+export function toHar(exchanges: Exchange[], inputs: PhoneInput[] = []): object {
   return {
     log: {
       version: '1.2',
       creator: { name: 'sideglass', version: '0.1.0' },
+      _sideglass: {
+        inputs: inputs.map(({ id, at, device, kind, label }) => ({ id, at, device, kind, label })),
+      },
       entries: exchanges.map((e) => {
         const url = new URL(e.url)
         return {
@@ -44,6 +48,7 @@ export function toHar(exchanges: Exchange[]): object {
           },
           cache: {},
           timings: { send: 0, wait: e.durationMs ?? 0, receive: 0 },
+          _sideglass: { app: e.app, inputId: e.inputId },
         }
       }),
     },

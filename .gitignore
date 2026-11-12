@@ -4,3 +4,14 @@ dist/
 .smoke-data/
 *.log
 .DS_Store
+
+# Test/capture artifacts that can hold secrets — never commit
+*.har
+*.pem
+*.key
+*.p12
+*.apk
+*.apks
+*.xapk
+.env
+.env.*

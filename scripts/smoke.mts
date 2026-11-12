@@ -5,7 +5,7 @@ import { Session } from '../src/main/session'
 
 const dataDir = join(process.cwd(), '.smoke-data')
 mkdirSync(dataDir, { recursive: true })
-const session = new Session(dataDir)
+const session = new Session(dataDir, { phone: 'virtual' })
 session.on('progress', (p) => console.log(`[${p.state}] ${p.step}: ${p.message}`))
 session.on('setup-log', (l) => console.log(`   ${l}`))
 

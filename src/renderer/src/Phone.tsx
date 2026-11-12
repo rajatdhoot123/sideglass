@@ -1,60 +1,39 @@
 import { useEffect, useState } from 'react'
-import type { Refusal, RefusalKind } from '../../shared'
+import type { Device, LaunchResult, PhoneMode } from '../../shared'
 import { AddApp } from './AddApp'
+import { CloneApp } from './CloneApp'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
 
-const REASONS: Record<RefusalKind, string> = {
-  integrity: 'an integrity check (Play Integrity or Play Protect)',
-  root: 'a root check',
-  emulator: 'an emulator check',
-  frida: 'a hooking (Frida) check',
-  crash: 'a crash',
-}
-
 /** The live phone: frames from the device; clicks and drags become taps and swipes. */
-export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void }) {
+export function Phone({
+  mode,
+  activeDevice,
+  onActiveDevice,
+  onLaunched,
+}: {
+  mode: PhoneMode
+  activeDevice: Device
+  onActiveDevice: (device: Device) => void
+  onLaunched: (pid: number | null, pkg?: string) => void
+}) {
   const [adding, setAdding] = useState(false)
+  const [cloning, setCloning] = useState(false)
+  const [lastApp, setLastApp] = useState<string | undefined>()
   const [apps, setApps] = useState<string[]>([])
   const [status, setStatus] = useState('')
-  const [hooksOn, setHooksOn] = useState(true)
-  const [hooksStarting, setHooksStarting] = useState(false)
-  const [hooksMsg, setHooksMsg] = useState('')
-  const [refusal, setRefusal] = useState<Refusal | null>(null)
   const [smsFrom, setSmsFrom] = useState('VM-HDFCBK')
   const [smsText, setSmsText] = useState('Rs.500.00 debited from A/c XX1234 on 07-11-26 to ZOMATO. UPI Ref 512345678901')
   const [dragging, setDragging] = useState(false)
-  useEffect(() => {
-    void window.api.apps().then(setApps)
-    void window.api.hooksState().then((s) => {
-      setHooksOn(s.enabled)
-      setHooksStarting(s.starting)
-    })
-    return [
-      window.api.on('hooks-log', (line) => setHooksMsg(line)),
-      window.api.on('hooks-state', (s) => {
-        setHooksOn(s.enabled)
-        setHooksStarting(s.starting)
-        if (!s.ready && s.message) setHooksMsg(`Hooks unavailable: ${s.message}`)
-      }),
-      window.api.on('app-refusal', (r) => setRefusal(r)),
-    ].reduce((off, next) => {
-      const prev = off
-      return () => {
-        prev()
-        next()
-      }
-    })
-  }, [])
+  useEffect(() => void window.api.apps().then(setApps), [])
+  // Long steps (such as putting Google Play on the phone for a licensed app) report progress here.
+  useEffect(() => window.api.on('store-log', (line) => setStatus(line)), [])
 
-  const launch = async (pkg: string) => {
-    setRefusal(null)
-    setStatus(`Starting ${pkg}…`)
-    const result = await window.api.launch(pkg)
-    onLaunched(result.pid)
-    const running = result.pid
-      ? `${pkg} running (pid ${result.pid})${result.hooked ? ', with hooks' : ''}`
-      : `${pkg} did not start`
-    setStatus(result.fallback ? `${running}. ${result.fallback}` : running)
+  const showLaunch = (pkg: string, result: LaunchResult, idle: string) => {
+    setLastApp(pkg)
+    onActiveDevice(result.device)
+    // Logcat is the capture phone. A Play-phone pid would filter it to the wrong process.
+    onLaunched(result.device === 'capture' ? result.pid : null, pkg)
+    setStatus(result.message ?? (result.pid ? `${pkg} running (pid ${result.pid})` : idle))
   }
 
   const install = async (files: FileList) => {
@@ -89,7 +68,12 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
           defaultValue=""
           onChange={async (e) => {
             if (!e.target.value) return
-            await launch(e.target.value)
+            setStatus(`Starting ${e.target.value}…`)
+            try {
+              showLaunch(e.target.value, await window.api.launch(e.target.value), `${e.target.value} did not start`)
+            } catch (error) {
+              setStatus(`Could not start ${e.target.value}: ${(error as Error).message}`)
+            }
           }}
         >
           <option value="">Launch app…</option>
@@ -97,52 +81,97 @@ export function Phone({ onLaunched }: { onLaunched: (pid: number | null) => void
             <option key={a}>{a}</option>
           ))}
         </select>
-        <button
-          className={hooksOn ? 'on' : ''}
-          title="Start apps through Frida: trust the Sideglass CA, drop certificate pinning, hide root and emulator checks, rewrite locally-read integrity verdicts"
-          onClick={async () => {
-            const s = await window.api.setHooks(!hooksOn)
-            setHooksOn(s.enabled)
-            setHooksStarting(s.starting)
-          }}
-        >
-          Hooks {hooksOn ? (hooksStarting ? 'starting…' : 'on') : 'off'}
-        </button>
         <button onClick={() => void window.api.apps().then(setApps)}>↻</button>
+        {activeDevice === 'play' && (
+          <button
+            onClick={() => {
+              onActiveDevice('capture')
+              onLaunched(null)
+              setStatus('Showing the capture phone.')
+            }}
+          >
+            Capture phone
+          </button>
+        )}
+        <button disabled={!apps.length} title="Install a renamed copy of an app next to the original" onClick={() => setCloning(true)}>
+          Clone app
+        </button>
         <button className="primary" onClick={() => setAdding(true)}>
           + Add app
         </button>
       </div>
-      {refusal && (
-        <div className="banner needs-user">
-          <strong>{refusal.pkg} refused to run</strong> — {REASONS[refusal.kind]}. What it did before the check is
-          still captured
-          {refusal.kind === 'integrity' ? '; a verdict its own server verifies cannot be unlocked from here' : ''}.{' '}
-          <span className="muted">{refusal.sample}</span>
-        </div>
-      )}
       {adding && (
         <AddApp
+          mode={mode}
           onClose={() => setAdding(false)}
           onInstalled={async (pkg, open) => {
             setApps(await window.api.apps())
             if (!pkg || !open) return
-            // Hand back to the capture phone: close the dialog and open the new app.
+            // Close the dialog and open the app on the device that can run it.
             setAdding(false)
-            await launch(pkg)
+            setStatus(`Starting ${pkg}…`)
+            try {
+              showLaunch(pkg, await window.api.launch(pkg), `${pkg} installed; it did not start by itself`)
+            } catch (error) {
+              setStatus(`Could not start ${pkg}: ${(error as Error).message}`)
+            }
           }}
         />
       )}
-      <DeviceScreen device="capture" />
-      <NavKeys device="capture" />
-      <TypeBar device="capture" />
-      <details className="sms">
-        <summary>Send a test SMS</summary>
-        <input value={smsFrom} onChange={(e) => setSmsFrom(e.target.value)} />
-        <textarea value={smsText} onChange={(e) => setSmsText(e.target.value)} rows={3} />
-        <button onClick={() => void window.api.sendSms(smsFrom, smsText).then(() => setStatus('SMS sent'))}>Send</button>
-      </details>
-      <div className="status">{status || hooksMsg || 'Drop an APK here to install it.'}</div>
+      {cloning && (
+        <CloneApp
+          apps={apps}
+          initial={lastApp}
+          onClose={() => setCloning(false)}
+          onCloned={async (pkg, open) => {
+            setApps(await window.api.apps())
+            if (!open) return
+            setCloning(false)
+            setStatus(`Starting ${pkg}…`)
+            try {
+              showLaunch(pkg, await window.api.launch(pkg), `${pkg} installed; it did not start by itself`)
+            } catch (error) {
+              setStatus(`Could not start ${pkg}: ${(error as Error).message}`)
+            }
+          }}
+        />
+      )}
+      <DeviceScreen device={activeDevice} />
+      <NavKeys device={activeDevice} />
+      <TypeBar device={activeDevice} />
+      {mode === 'usb' && (
+        <div className="cert-hint">
+          <span className="muted">
+            To see HTTPS contents for apps that allow it, install <code>Download/sideglass-ca.crt</code> on the phone as a
+            CA certificate.
+          </span>
+          <button
+            onClick={() =>
+              void window.api.openCertificateSettings().catch((error: Error) => setStatus(`Could not open settings: ${error.message}`))
+            }
+          >
+            Open phone settings
+          </button>
+        </div>
+      )}
+      {mode === 'virtual' && (
+        <details className="sms">
+          <summary>Send a test SMS to this phone</summary>
+          <input value={smsFrom} onChange={(e) => setSmsFrom(e.target.value)} />
+          <textarea value={smsText} onChange={(e) => setSmsText(e.target.value)} rows={3} />
+          <button
+            onClick={() =>
+              void window.api.sendSms(activeDevice, smsFrom, smsText).then(
+                () => setStatus('SMS sent'),
+                (error: Error) => setStatus(`SMS failed: ${error.message}`),
+              )
+            }
+          >
+            Send
+          </button>
+        </details>
+      )}
+      <div className="status">{status || 'Drop an APK here to install it.'}</div>
     </section>
   )
 }
