@@ -118,6 +118,8 @@ h4 { margin: 10px 0 4px; color: var(--muted); font-weight: 500; }
 }
 button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
 button:disabled { opacity: 0.5; cursor: default; }
+button.on { border-color: var(--accent); color: var(--accent); }
+.right .banner { margin: 0; font-size: 12px; }
 .modal-back { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); display: flex; align-items: center; justify-content: center; z-index: 10; }
 .modal { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; width: 760px; max-width: 95vw; height: 80vh; display: flex; flex-direction: column; }
 .modal.wide { width: 1100px; }
