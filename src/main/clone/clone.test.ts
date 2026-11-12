@@ -172,3 +172,13 @@ test('renameResourcePackage renames the app package in the resource table only',
   assert.equal(out.length, arsc.length)
   assert.equal(renameResourcePackage(arsc, 'com.other', 'com.fresh'), null)
 })
+
+test('explainInstallError names the limitation behind adb install failures', async () => {
+  const { explainInstallError } = await import('./explain')
+  assert.match(
+    explainInstallError('Failure [INSTALL_FAILED_CONFLICTING_PROVIDER: Scanning Failed.: Can\'t install because provider name x]', 'com.fresh'),
+    /content provider .* cannot be cloned/,
+  )
+  assert.match(explainInstallError('com.fresh is already installed and signed with another key.', 'com.fresh'), /Pick a different package name/)
+  assert.match(explainInstallError('Failure [SOMETHING_NEW]', 'com.fresh'), /^Android refused to install the clone: Failure \[SOMETHING_NEW\]$/)
+})

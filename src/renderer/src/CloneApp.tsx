@@ -18,18 +18,29 @@ export function CloneApp({
   const [open, setOpen] = useState(true)
   const [busy, setBusy] = useState(false)
   const [log, setLog] = useState<string[]>([])
+  /** What the user must know: why the clone failed, or the limitation that stops it running. */
+  const [problem, setProblem] = useState<{ title: string; text: string } | null>(null)
   useEffect(() => window.api.on('store-log', (l) => setLog((prev) => [...prev.slice(-30), l])), [])
   const target = newPkg.trim() || (pkg ? `${pkg}.clone` : '')
 
   const clone = async () => {
     setBusy(true)
     setLog([])
+    setProblem(null)
     try {
       const result = await window.api.cloneApp({ pkg, newPkg: target, label: label.trim() || undefined })
-      setLog((prev) => [...prev, `Done: “${result.label}” is installed as ${result.pkg}, next to ${pkg}.`])
-      onCloned(result.pkg, open)
+      if (result.warning) {
+        // Keep the dialog open: the user needs to read why the clone does not run.
+        setProblem({ title: `“${result.label}” is installed, but it does not run as a clone`, text: result.warning })
+        onCloned(result.pkg, false)
+      } else {
+        setLog((prev) => [...prev, `Done: “${result.label}” is installed as ${result.pkg}, next to ${pkg}.`])
+        onCloned(result.pkg, open)
+      }
     } catch (error) {
-      setLog((prev) => [...prev, `Clone failed: ${(error as Error).message}`])
+      // Electron prefixes IPC errors with "Error invoking remote method …: Error: ".
+      const message = (error as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
+      setProblem({ title: `${pkg} could not be cloned`, text: message })
     } finally {
       setBusy(false)
     }
@@ -73,6 +84,12 @@ export function CloneApp({
             <li>Apps that check their own signature, Google sign-in, Play licensing or Play Integrity may refuse to run as a clone.</li>
             <li>Cloning again with the same package name updates the earlier clone.</li>
           </ul>
+          {problem && (
+            <div className="banner needs-user">
+              <b>{problem.title}</b>
+              <div className="problem-text">{problem.text}</div>
+            </div>
+          )}
           <div className="choice-actions">
             <button className="primary" disabled={busy || !pkg || !target} onClick={() => void clone()}>
               {busy ? 'Cloning…' : 'Clone and install'}

@@ -10,6 +10,7 @@ import type { Sdk } from '../sdk'
 import { installApks, isPackageName, pullApp } from '../store/apk'
 import { patchManifest } from './axml'
 import { renameResourcePackage } from './arsc'
+import { checkClone, explainInstallError } from './explain'
 import { renameInCode } from './code'
 import { readEntry, repack } from './zip'
 
@@ -125,6 +126,8 @@ export interface CloneResult {
   pkg: string
   label: string
   install: string
+  /** Set when the clone installed but does not run: the limitation, in plain words. */
+  warning?: string
 }
 
 /**
@@ -175,7 +178,11 @@ export async function cloneApp(adb: Adb, sdk: Sdk, dataDir: string, options: Clo
       }
     } catch (error) {
       // The clone still installs; only code that checks those names may fail.
-      log(`Could not rename names in the code of ${name}, cloning without it: ${(error as Error).message.split('\n')[0]}`)
+      const message = (error as Error).message
+      const reason = /ENOENT|Unable to locate a Java|java: command not found/i.test(message)
+        ? 'Java is not installed (install Android Studio or a JDK)'
+        : message.split('\n')[0]
+      log(`Could not rename names in the code of ${name}, cloning without it. Apps whose code checks its own package name may not start. Reason: ${reason}`)
     }
     const unsigned = join(out, `unsigned-${name}`)
     const aligned = join(out, `aligned-${name}`)
@@ -183,7 +190,16 @@ export async function cloneApp(adb: Adb, sdk: Sdk, dataDir: string, options: Clo
     writeFileSync(unsigned, repack(zip, replace))
     // -P 16: 16 KB alignment for uncompressed native libraries, which also satisfies 4 KB pages.
     await run(tools.zipalign, ['-f', '-P', '16', '4', unsigned, aligned]).catch(() => run(tools.zipalign, ['-f', '-p', '4', unsigned, aligned]))
-    await run(tools.apksigner, ['sign', '--key', key.key, '--cert', key.cert, '--out', final, aligned], { timeout: 300_000 })
+    await run(tools.apksigner, ['sign', '--key', key.key, '--cert', key.cert, '--out', final, aligned], { timeout: 300_000 }).catch(
+      (error: Error & { stderr?: string }) => {
+        const text = `${error.stderr ?? ''} ${error.message}`
+        throw new Error(
+          /Java|ENOENT/i.test(text)
+            ? 'Signing the clone needs Java, which was not found. Install Android Studio or a JDK, then try again.'
+            : `Signing the clone failed: ${text.trim().split('\n').pop()}`,
+        )
+      },
+    )
     rmSync(unsigned, { force: true })
     rmSync(aligned, { force: true })
     signed.push(final)
@@ -191,7 +207,12 @@ export async function cloneApp(adb: Adb, sdk: Sdk, dataDir: string, options: Clo
 
   log(`Installing ${newPkg} (“${label}”)…`)
   // Never uninstall whatever already uses this package name: it may be a real app.
-  const install = await installApks(adb, signed, undefined, false)
+  const install = await installApks(adb, signed, undefined, false).catch((error: Error) => {
+    throw new Error(explainInstallError(error.message, newPkg))
+  })
   log(`${newPkg}: ${install}`)
-  return { pkg: newPkg, label, install }
+  log('Starting the clone once to check it runs…')
+  const warning = (await checkClone(adb, newPkg)) ?? undefined
+  log(warning ? `${newPkg} is installed but does not run: ${warning.split('\n')[0]}` : `${newPkg} runs.`)
+  return { pkg: newPkg, label, install, warning }
 }
