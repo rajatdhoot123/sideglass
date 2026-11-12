@@ -59,7 +59,8 @@ src/main/            Electron main process (Node)
                      Copies onto the capture phone are installed as coming from Google Play
   store/usb.ts       list USB phones and their user apps
   clone/             Clone app: axml.ts edits the binary manifest (package, class names, authorities,
-                     permissions, label); zip.ts re-packs the APK byte for byte; index.ts pulls, patches,
+                     permissions, label); code.ts renames the same names in the dex via apktool (only
+                     when the dex has them); zip.ts re-packs the APK byte for byte; index.ts pulls, patches,
                      zipaligns, signs with userData/data/signing/clone-key.pk8 and installs next to the original
 src/preload/index.ts contextBridge `window.api`
 src/shared.ts        Api type shared by preload and renderer

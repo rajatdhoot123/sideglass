@@ -234,6 +234,11 @@ export interface PatchResult {
   oldPkg: string
   /** How many labels were replaced (0 for split APKs). */
   labels: number
+  /**
+   * Authorities, permissions and shared user ids that were renamed, old to new. Code that has
+   * the old names written in must be changed the same way, or it disagrees with the manifest.
+   */
+  renames: Map<string, string>
 }
 
 /** Rename the package (and its authorities and permissions) and, optionally, the label. */
@@ -268,7 +273,12 @@ export function patchManifest(input: Buffer, edit: ManifestEdit): PatchResult {
   const newPkg = edit.pkg
 
   /** A name that must not clash with the original app's: swap the package in, or put it in front. */
-  const own = (value: string) => (value.includes(oldPkg) ? value.split(oldPkg).join(newPkg) : `${newPkg}.${value}`)
+  const renames = new Map<string, string>()
+  const own = (value: string) => {
+    const renamed = value.includes(oldPkg) ? value.split(oldPkg).join(newPkg) : `${newPkg}.${value}`
+    renames.set(value, renamed)
+    return renamed
+  }
   /** Android reads ".Foo" and "Foo" as classes in the manifest package; the code keeps the old one. */
   const absolute = (value: string) => (value.startsWith('.') ? oldPkg + value : value.includes('.') ? value : `${oldPkg}.${value}`)
 
@@ -315,5 +325,5 @@ export function patchManifest(input: Buffer, edit: ManifestEdit): PatchResult {
   const rest = out.subarray(doc.pool.end)
   const header = Buffer.from(out.subarray(0, out.readUInt16LE(2)))
   header.writeUInt32LE(header.length + pool.length + rest.length, 4)
-  return { manifest: Buffer.concat([header, pool, rest]), oldPkg, labels }
+  return { manifest: Buffer.concat([header, pool, rest]), oldPkg, labels, renames }
 }

@@ -63,6 +63,11 @@ function entries(zip: Buffer): Entry[] {
   return list
 }
 
+/** Every entry name, in order. */
+export function entryNames(zip: Buffer): string[] {
+  return entries(zip).map((e) => e.name)
+}
+
 /** The uncompressed contents of one entry, or null if it is not there. */
 export function readEntry(zip: Buffer, name: string): Buffer | null {
   const entry = entries(zip).find((e) => e.name === name)

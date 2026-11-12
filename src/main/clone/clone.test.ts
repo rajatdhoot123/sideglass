@@ -104,6 +104,8 @@ test('patchManifest renames the package, its names, and the launcher label', () 
   assert.deepEqual(el('activity', 1), { name: 'com.lib.Other', label: 'Settings' })
   assert.deepEqual(el('provider'), { name: 'com.old.Files', authorities: 'com.fresh.files;com.fresh.com.facebook.app.P1', permission: 'com.fresh.PERM' })
   assert.equal(el('provider', 1).authorities, 'com.fresh.ref')
+  assert.equal(out.renames.get('com.old.files'), 'com.fresh.files')
+  assert.equal(out.renames.get('com.old.PERM'), 'com.fresh.PERM')
 })
 
 test('repack replaces one entry, keeps the rest, and drops the old signature', () => {

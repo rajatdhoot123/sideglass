@@ -9,6 +9,7 @@ import type { Adb } from '../adb'
 import type { Sdk } from '../sdk'
 import { installApks, isPackageName, pullApp } from '../store/apk'
 import { patchManifest } from './axml'
+import { renameInCode } from './code'
 import { readEntry, repack } from './zip'
 
 const run = promisify(execFile)
@@ -148,7 +149,11 @@ export async function cloneApp(adb: Adb, sdk: Sdk, dataDir: string, options: Clo
   rmSync(out, { recursive: true, force: true })
   mkdirSync(out, { recursive: true })
   const signed: string[] = []
-  for (const apk of pulled) {
+  // Names renamed in the manifest, to rename in the code as well. Only names that contain the
+  // package: a short generic one (say "downloads") could match unrelated strings in the code.
+  const renames = new Map<string, string>()
+  // The base APK declares the providers, so it goes first; splits with code then use its names.
+  for (const apk of [base, ...pulled.filter((p) => p !== base)]) {
     const name = basename(apk)
     log(`Rewriting ${name}…`)
     const zip = readFileSync(apk)
@@ -156,10 +161,22 @@ export async function cloneApp(adb: Adb, sdk: Sdk, dataDir: string, options: Clo
     if (!manifest) throw new Error(`${name} has no AndroidManifest.xml`)
     const patched = patchManifest(manifest, { pkg: newPkg, label: apk === base ? label : undefined, resolve: (id) => strings.get(id) ?? null })
     if (patched.oldPkg !== pkg) throw new Error(`${name} belongs to ${patched.oldPkg}, not ${pkg}`)
+    for (const [from, to] of patched.renames) if (from.includes(pkg)) renames.set(from, to)
+    const replace = new Map([['AndroidManifest.xml', patched.manifest]])
+    try {
+      const code = await renameInCode(apk, renames, out, join(dataDir, 'tools'), log)
+      if (code) {
+        for (const [entry, dex] of code.dex) replace.set(entry, dex)
+        log(`Renamed ${code.changed} name(s) in the code of ${name}.`)
+      }
+    } catch (error) {
+      // The clone still installs; only code that checks those names may fail.
+      log(`Could not rename names in the code of ${name}, cloning without it: ${(error as Error).message.split('\n')[0]}`)
+    }
     const unsigned = join(out, `unsigned-${name}`)
     const aligned = join(out, `aligned-${name}`)
     const final = join(out, name)
-    writeFileSync(unsigned, repack(zip, new Map([['AndroidManifest.xml', patched.manifest]])))
+    writeFileSync(unsigned, repack(zip, replace))
     // -P 16: 16 KB alignment for uncompressed native libraries, which also satisfies 4 KB pages.
     await run(tools.zipalign, ['-f', '-P', '16', '4', unsigned, aligned]).catch(() => run(tools.zipalign, ['-f', '-p', '4', unsigned, aligned]))
     await run(tools.apksigner, ['sign', '--key', key.key, '--cert', key.cert, '--out', final, aligned], { timeout: 300_000 })
