@@ -368,18 +368,19 @@ if (Java.available) {
         }
         return out
       }
-      function hookInstalled(method, sig) {
+      // this.method() inside an implementation calls the original. A computed this[name]() recurses.
+      function hookList(method, sig) {
         try {
           PM[method].overload(sig).implementation = function (flags) {
-            var list = this[method](flags)
+            var list = method === 'getInstalledPackages' ? this.getInstalledPackages(flags) : this.getInstalledApplications(flags)
             try { return filterInstalled(list) } catch (e) { return list }
           }
         } catch (e) {}
       }
-      hookInstalled('getInstalledPackages', 'int')
-      hookInstalled('getInstalledPackages', 'android.content.pm.PackageManager$PackageInfoFlags')
-      hookInstalled('getInstalledApplications', 'int')
-      hookInstalled('getInstalledApplications', 'android.content.pm.PackageManager$ApplicationInfoFlags')
+      hookList('getInstalledPackages', 'int')
+      hookList('getInstalledPackages', 'android.content.pm.PackageManager$PackageInfoFlags')
+      hookList('getInstalledApplications', 'int')
+      hookList('getInstalledApplications', 'android.content.pm.PackageManager$ApplicationInfoFlags')
     })
 
     sgTry('Permissive TrustManager', function () {

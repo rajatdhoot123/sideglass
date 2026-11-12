@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { generateSPKIFingerprint } from 'mockttp'
 import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
-import { CAPTURE_PHONE, ensureAvd, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
+import { CAPTURE_PHONE, ensureAvd, IMAGE_ABI, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
 import { installApks, isPackageName, pullApp } from './store/apk'
 import { cloneApp, type CloneOptions, type CloneResult } from './clone'
 import { hasPlayStore, installPlayStore, needsPlayLicense, pullPlayStore } from './playstore'
@@ -12,8 +12,10 @@ import { packageFromPlayLink, PlayHelper } from './store/play'
 import { usbPhones, userApps } from './store/usb'
 import { Adb } from './adb'
 import { Attributor } from './attrib'
+import { Hooks, type HooksSnapshot } from './hooks'
 import { Timeline } from './timeline'
-import { Logcat } from './logcat'
+import { Logcat, type LogLine } from './logcat'
+import { classifyRefusal, type Refusal } from './refusal'
 import { CaptureProxy } from './proxy'
 import { Mirror } from './mirror'
 import { findSdk, type Sdk } from './sdk'
@@ -40,6 +42,10 @@ export class Session extends EventEmitter {
   logcat: Logcat | null = null
   /** USB mode: the phone whose proxy setting we changed, and the port, to undo on stop. */
   private routed: { adb: Adb; port: number } | null = null
+  private hooks: Hooks | null = null
+  private hooksEnabled = true
+  /** Apps we launched, so logcat can be watched for them refusing to run. */
+  private refusals = new Map<string, { pid: number | null; seen: Set<Refusal['kind']> }>()
 
   constructor(
     private readonly dataDir: string,
@@ -94,7 +100,10 @@ export class Session extends EventEmitter {
     }
     await this.attachScreen(adb)
     this.logcat = new Logcat(adb)
-    this.logcat.on('lines', (lines) => this.emit('logcat', lines))
+    this.logcat.on('lines', (lines: LogLine[]) => {
+      this.checkRefusals(lines)
+      this.emit('logcat', lines)
+    })
     this.logcat.start()
     this.progress('ready', 'done', 'Ready')
   }
@@ -197,8 +206,13 @@ export class Session extends EventEmitter {
       await adb.root()
       await this.trust(adb, this.ca!)
     } finally {
+      // Installing Play reboots the phone, so a frida-server from an earlier launch is gone.
+      await this.hooks?.stop().catch(() => undefined)
       this.logcat = new Logcat(adb)
-      this.logcat.on('lines', (lines) => this.emit('logcat', lines))
+      this.logcat.on('lines', (lines: LogLine[]) => {
+        this.checkRefusals(lines)
+        this.emit('logcat', lines)
+      })
       this.logcat.start()
       await this.attachScreen(adb)
     }
@@ -342,10 +356,65 @@ export class Session extends EventEmitter {
     const component = resolved.trim().split('\n').pop()?.trim() ?? ''
     if (!component.startsWith(`${pkg}/`)) throw new Error(`${pkg} has no launcher activity`)
     if (this.attrib) this.attrib.preferPkg = pkg
+    this.refusals.delete(pkg)
+    // Hooks need root. A USB phone, and any other emulator treated as one, stays on a normal launch.
+    if (this.hooksEnabled && this.mode === 'virtual') {
+      try {
+        const pid = await this.getHooks().launch(pkg)
+        this.watch(pkg, pid)
+        return { device: 'capture', pid, hooked: true, message }
+      } catch (error) {
+        const fallback = `Hooks unavailable (${(error as Error).message}); launching normally`
+        this.emit('hooks-log', fallback)
+        message = message ? `${message} ${fallback}` : fallback
+      }
+    }
     await adb.shell(`am force-stop ${pkg}`)
     await adb.shell(`am start -n '${component}'`)
     await new Promise((r) => setTimeout(r, 1500))
-    return { device: 'capture', pid: await this.pidOf(pkg), message }
+    const pid = await this.pidOf(pkg)
+    if (pid) this.watch(pkg, pid)
+    return { device: 'capture', pid, hooked: false, message }
+  }
+
+  /** Watch logcat from a launched app so the UI can say why it refused to run. */
+  private watch(pkg: string, pid: number | null): void {
+    this.refusals.set(pkg, { pid, seen: new Set() })
+  }
+
+  private checkRefusals(lines: LogLine[]): void {
+    for (const [pkg, info] of this.refusals) {
+      const hit = classifyRefusal(lines, pkg, info.pid)
+      if (hit && !info.seen.has(hit.kind)) {
+        info.seen.add(hit.kind)
+        this.emit('app-refusal', hit)
+      }
+    }
+  }
+
+  private getHooks(): Hooks {
+    if (!this.hooks) {
+      this.hooks = new Hooks(() => this.requireAdb(), IMAGE_ABI, join(this.dataDir, 'frida'), {
+        log: (line) => this.emit('hooks-log', line),
+        state: (snapshot) => this.emit('hooks-state', snapshot),
+      })
+    }
+    return this.hooks
+  }
+
+  setHooksEnabled(on: boolean): HooksSnapshot {
+    this.hooksEnabled = on
+    // Snapshot reads Hooks.enabled. Update it first, or the switch sticks on the old value.
+    if (this.hooks) this.hooks.enabled = on
+    const snapshot = this.hooksState()
+    this.emit('hooks-state', snapshot)
+    return snapshot
+  }
+
+  hooksState(): HooksSnapshot {
+    const live = this.hooks?.snapshot()
+    if (!live) return { enabled: this.hooksEnabled, ready: false, starting: false, message: '' }
+    return { ...live, enabled: this.hooksEnabled }
   }
 
   async pidOf(pkg: string): Promise<number | null> {
@@ -370,6 +439,7 @@ export class Session extends EventEmitter {
     this.attrib = null
     this.screen?.stop()
     this.logcat?.stop()
+    await this.hooks?.stop().catch(() => undefined)
     await this.play?.stop().catch(() => undefined)
     if (this.routed) {
       // Give the phone its own internet back; otherwise it keeps pointing at a closed proxy.

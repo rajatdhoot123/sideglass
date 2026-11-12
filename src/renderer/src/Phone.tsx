@@ -1,8 +1,16 @@
 import { useEffect, useState } from 'react'
-import type { Device, LaunchResult, PhoneMode } from '../../shared'
+import type { Device, LaunchResult, PhoneMode, Refusal, RefusalKind } from '../../shared'
 import { AddApp } from './AddApp'
 import { CloneApp } from './CloneApp'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
+
+const REASONS: Record<RefusalKind, string> = {
+  integrity: 'an integrity check (Play Integrity or Play Protect)',
+  root: 'a root check',
+  emulator: 'an emulator check',
+  frida: 'a hooking (Frida) check',
+  crash: 'a crash',
+}
 
 /** The live phone: frames from the device; clicks and drags become taps and swipes. */
 export function Phone({
@@ -24,16 +32,43 @@ export function Phone({
   const [smsFrom, setSmsFrom] = useState('VM-HDFCBK')
   const [smsText, setSmsText] = useState('Rs.500.00 debited from A/c XX1234 on 07-11-26 to ZOMATO. UPI Ref 512345678901')
   const [dragging, setDragging] = useState(false)
+  const [hooksOn, setHooksOn] = useState(true)
+  const [hooksStarting, setHooksStarting] = useState(false)
+  const [hooksMsg, setHooksMsg] = useState('')
+  const [refusal, setRefusal] = useState<Refusal | null>(null)
   useEffect(() => void window.api.apps().then(setApps), [])
+  useEffect(() => {
+    void window.api.hooksState().then((s) => {
+      setHooksOn(s.enabled)
+      setHooksStarting(s.starting)
+    })
+    return [
+      window.api.on('hooks-log', (line) => setHooksMsg(line)),
+      window.api.on('hooks-state', (s) => {
+        setHooksOn(s.enabled)
+        setHooksStarting(s.starting)
+        if (!s.ready && s.message) setHooksMsg(`Hooks unavailable: ${s.message}`)
+      }),
+      window.api.on('app-refusal', (r) => setRefusal(r)),
+    ].reduce((off, next) => {
+      const prev = off
+      return () => {
+        prev()
+        next()
+      }
+    })
+  }, [])
   // Long steps (such as putting Google Play on the phone for a licensed app) report progress here.
   useEffect(() => window.api.on('store-log', (line) => setStatus(line)), [])
 
   const showLaunch = (pkg: string, result: LaunchResult, idle: string) => {
     setLastApp(pkg)
+    setRefusal(null)
     onActiveDevice(result.device)
     // Logcat is the capture phone. A Play-phone pid would filter it to the wrong process.
     onLaunched(result.device === 'capture' ? result.pid : null, pkg)
-    setStatus(result.message ?? (result.pid ? `${pkg} running (pid ${result.pid})` : idle))
+    const running = result.pid ? `${pkg} running (pid ${result.pid})${result.hooked ? ', with hooks' : ''}` : idle
+    setStatus(result.message ? `${running}. ${result.message}` : running)
   }
 
   const install = async (files: FileList) => {
@@ -81,6 +116,19 @@ export function Phone({
             <option key={a}>{a}</option>
           ))}
         </select>
+        {mode === 'virtual' && (
+          <button
+            className={hooksOn ? 'on' : ''}
+            title="Start apps through Frida: trust the Sideglass CA, drop certificate pinning, hide root and emulator checks, rewrite locally-read integrity verdicts"
+            onClick={async () => {
+              const s = await window.api.setHooks(!hooksOn)
+              setHooksOn(s.enabled)
+              setHooksStarting(s.starting)
+            }}
+          >
+            Hooks {hooksOn ? (hooksStarting ? 'starting…' : 'on') : 'off'}
+          </button>
+        )}
         <button onClick={() => void window.api.apps().then(setApps)}>↻</button>
         {activeDevice === 'play' && (
           <button
@@ -100,6 +148,14 @@ export function Phone({
           + Add app
         </button>
       </div>
+      {refusal && (
+        <div className="banner needs-user">
+          <strong>{refusal.pkg} refused to run</strong> — {REASONS[refusal.kind]}. What it did before the check is still
+          captured
+          {refusal.kind === 'integrity' ? '; a verdict its own server verifies cannot be unlocked from here' : ''}.{' '}
+          <span className="muted">{refusal.sample}</span>
+        </div>
+      )}
       {adding && (
         <AddApp
           mode={mode}
@@ -171,7 +227,11 @@ export function Phone({
           </button>
         </details>
       )}
-      <div className="status">{status || 'Drop an APK here to install it.'}</div>
+      <div className="status">
+        {status && hooksMsg && !status.includes(hooksMsg)
+          ? `${status} — ${hooksMsg}`
+          : status || hooksMsg || 'Drop an APK here to install it.'}
+      </div>
     </section>
   )
 }

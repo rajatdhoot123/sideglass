@@ -1,8 +1,7 @@
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
-import { join } from 'node:path'
-import frida, { type Device, type Script, type Session } from 'frida'
+import { dirname, join } from 'node:path'
 import type { Adb } from './adb'
 import { AGENT_SOURCE } from './agent'
 
@@ -40,9 +39,10 @@ export class Hooks {
   ready = false
   message = ''
 
-  private device: Device | null = null
+  /** System Node. Electron cannot load the frida prebuild (different ABI). */
+  private host: HookHost | null = null
   private starting = false
-  private active = new Map<string, { session: Session; script: Script }>()
+  private serverReady = false
 
   constructor(
     private readonly getAdb: () => Adb,
@@ -65,84 +65,38 @@ export class Hooks {
 
   /** Start `pkg` suspended, inject the agent, then let it run. Returns its pid. */
   async launch(pkg: string): Promise<number> {
-    const device = await this.ensureDevice()
+    await this.ensureServer()
     const adb = this.getAdb()
     await adb.shell(`am force-stop ${pkg}`)
-    await this.unload(pkg)
-    let spawned: number | null = null
-    let abandoned = false
-    const attempt = (async () => {
-      const pid = await device.spawn(pkg)
-      spawned = pid
-      // Timeout does not cancel spawn. Kill a process that arrived after we gave up.
-      const stopIfAbandoned = async () => {
-        if (!abandoned) return
-        await device.kill(pid).catch(() => undefined)
-        throw new Error('hook injection abandoned')
-      }
-      await stopIfAbandoned()
-      const session = await device.attach(pid)
-      await stopIfAbandoned()
-      const script = await session.createScript(AGENT_SOURCE)
-      this.observeScript(pkg, script)
-      await stopIfAbandoned()
-      await script.load()
-      await stopIfAbandoned()
-      await device.resume(pid)
-      await stopIfAbandoned()
-      this.active.set(pkg, { session, script })
-      return pid
-    })()
-    // The timeout rejects without cancelling the RPC. Swallow that late rejection.
-    void attempt.catch(() => undefined)
+    const host = this.host ?? (this.host = new HookHost((line) => this.say(line)))
     try {
-      return await withTimeout(attempt, INJECT_TIMEOUT_MS, 'Hook injection')
+      const pid = await withTimeout(host.spawn(pkg, AGENT_SOURCE), INJECT_TIMEOUT_MS, 'Hook injection')
+      return pid
     } catch (error) {
-      abandoned = true
-      // A server that accepts the port and then never answers keeps a dead handle.
-      this.dropDevice()
-      if (spawned !== null) await withTimeout(device.kill(spawned), 3_000, 'kill').catch(() => undefined)
+      // A host that accepted the port and then stalled keeps a dead frida handle.
+      await host.stop().catch(() => undefined)
+      this.host = null
+      this.serverReady = false
+      this.ready = false
+      this.announce()
+      await adb.shell(`am force-stop ${pkg}`).catch(() => undefined)
       throw error
     }
   }
 
-  private observeScript(pkg: string, script: Script): void {
-    const scriptMessages = (script as unknown as { message?: { connect(cb: (raw: unknown) => void): void } }).message
-    scriptMessages?.connect((raw) => {
-      const msg = raw as { type?: string; payload?: { sg?: string; text?: string }; description?: string }
-      if (msg?.type === 'send' && msg.payload?.sg === 'log') this.say(`${pkg}: ${msg.payload.text}`)
-      else if (msg?.type === 'error') this.say(`${pkg}: hook error: ${msg.description ?? 'unknown'}`)
-    })
-  }
-
-  /** Drop the cached handle so the next launch pushes and starts frida-server again. */
-  private dropDevice(): void {
-    this.device = null
-    this.ready = false
-    this.starting = false
-    this.announce()
-  }
-
   async stop(): Promise<void> {
-    for (const pkg of [...this.active.keys()]) await this.unload(pkg)
-    this.device = null
+    await this.host?.stop().catch(() => undefined)
+    this.host = null
+    this.serverReady = false
     this.ready = false
     this.starting = false
     this.message = ''
     this.announce()
   }
 
-  private async unload(pkg: string): Promise<void> {
-    const prior = this.active.get(pkg)
-    if (!prior) return
-    this.active.delete(pkg)
-    try { await prior.script.unload() } catch { /* app may already be gone */ }
-    try { await prior.session.detach() } catch { /* ditto */ }
-  }
-
-  /** Push frida-server if needed, start it, and connect through an adb forward. */
-  private async ensureDevice(): Promise<Device> {
-    if (this.device) return this.device
+  /** Push frida-server if needed and forward its port. The frida client runs in HookHost. */
+  private async ensureServer(): Promise<void> {
+    if (this.serverReady && this.host) return
     this.starting = true
     this.message = ''
     this.announce()
@@ -161,14 +115,16 @@ export class Hooks {
         .catch(() => undefined)
       await adb.exec(['forward', `tcp:${SERVER_PORT}`, `tcp:${SERVER_PORT}`])
       await this.waitPort()
-      const manager = await frida.getDeviceManager()
-      this.device = await manager.addRemoteDevice(`127.0.0.1:${SERVER_PORT}`)
+      this.host ??= new HookHost((line) => this.say(line))
+      await this.host.ping()
+      this.serverReady = true
       this.ready = true
       this.message = ''
       this.say('Launch hooks ready')
-      return this.device
     } catch (error) {
-      this.device = null
+      await this.host?.stop().catch(() => undefined)
+      this.host = null
+      this.serverReady = false
       this.ready = false
       this.message = (error as Error).message
       throw error
@@ -222,6 +178,142 @@ export class Hooks {
     writeFileSync(target, raw)
     return target
   }
+}
+
+interface HostReply {
+  id: number
+  ok: boolean
+  error?: string
+  pid?: number
+}
+
+/** One system-Node process. It owns the frida device session so Electron never loads the native module. */
+class HookHost {
+  private child: ChildProcess | null = null
+  private nextId = 1
+  private readonly pending = new Map<number, { resolve: (reply: HostReply) => void; reject: (error: Error) => void }>()
+  private buffer = ''
+  private stderrTail = ''
+
+  constructor(private readonly log: (line: string) => void) {}
+
+  ping(): Promise<void> {
+    return this.request({ cmd: 'ping' }, 30_000).then(() => undefined)
+  }
+
+  async spawn(pkg: string, source: string): Promise<number> {
+    const reply = await this.request({ cmd: 'spawn', pkg, source, port: SERVER_PORT }, INJECT_TIMEOUT_MS)
+    if (!reply.pid) throw new Error('Frida did not return a process id')
+    return reply.pid
+  }
+
+  async stop(): Promise<void> {
+    if (!this.child) return
+    await this.request({ cmd: 'stop' }, 5_000).catch(() => undefined)
+    this.child.kill()
+    this.child = null
+    for (const waiter of this.pending.values()) waiter.reject(new Error('Hook host stopped'))
+    this.pending.clear()
+  }
+
+  private request(body: Record<string, unknown>, timeoutMs: number): Promise<HostReply> {
+    const child = this.ensure()
+    const id = this.nextId++
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new Error(`Hook host did not answer ${String(body.cmd)} in ${timeoutMs / 1000}s. ${this.stderrTail}`.trim()))
+      }, timeoutMs)
+      this.pending.set(id, {
+        resolve: (reply) => {
+          clearTimeout(timer)
+          resolve(reply)
+        },
+        reject: (error) => {
+          clearTimeout(timer)
+          reject(error)
+        },
+      })
+      child.stdin?.write(`${JSON.stringify({ id, ...body })}\n`)
+    })
+  }
+
+  private ensure(): ChildProcess {
+    if (this.child) return this.child
+    const script = hostScript()
+    const node = process.env.SIDEGLASS_NODE || 'node'
+    const child = spawn(node, [script], {
+      cwd: join(dirname(script), '..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    this.child = child
+    child.stdout?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk: string) => this.onStdout(chunk))
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (chunk: string) => this.onStderr(chunk))
+    child.on('error', (error) => this.failAll(error))
+    child.on('exit', (code) => {
+      this.child = null
+      this.failAll(new Error(`Hook host exited ${code ?? 'unknown'}. ${this.stderrTail}`.trim()))
+    })
+    return child
+  }
+
+  private onStdout(chunk: string): void {
+    this.buffer += chunk
+    for (;;) {
+      const end = this.buffer.indexOf('\n')
+      if (end < 0) return
+      const line = this.buffer.slice(0, end).trim()
+      this.buffer = this.buffer.slice(end + 1)
+      if (!line) continue
+      let reply: HostReply
+      try {
+        reply = JSON.parse(line) as HostReply
+      } catch {
+        this.log(line)
+        continue
+      }
+      const waiter = this.pending.get(reply.id)
+      if (!waiter) continue
+      this.pending.delete(reply.id)
+      if (reply.ok) waiter.resolve(reply)
+      else waiter.reject(new Error(reply.error || 'Hook host failed'))
+    }
+  }
+
+  private onStderr(chunk: string): void {
+    for (const line of chunk.split('\n')) {
+      const text = line.trim()
+      if (!text) continue
+      this.stderrTail = `${this.stderrTail}\n${text}`.slice(-2000)
+      try {
+        const parsed = JSON.parse(text) as { sg?: string; pkg?: string; message?: { type?: string; payload?: { sg?: string; text?: string }; description?: string } }
+        if (parsed.sg === 'script') {
+          const msg = parsed.message
+          if (msg?.type === 'send' && msg.payload?.sg === 'log') this.log(`${parsed.pkg}: ${msg.payload.text}`)
+          else if (msg?.type === 'error') this.log(`${parsed.pkg}: hook error: ${msg.description ?? 'unknown'}`)
+          continue
+        }
+      } catch {
+        // Ordinary stderr from the host.
+      }
+      this.log(text)
+    }
+  }
+
+  private failAll(error: Error): void {
+    for (const waiter of this.pending.values()) waiter.reject(error)
+    this.pending.clear()
+  }
+}
+
+/** scripts/hooks-host.mjs, next to the app when running from a checkout. */
+function hostScript(): string {
+  const candidates = [join(process.cwd(), 'scripts', 'hooks-host.mjs'), join(__dirname, '../../scripts/hooks-host.mjs')]
+  const found = candidates.find((path) => existsSync(path))
+  if (!found) throw new Error('Launch hooks host is missing (scripts/hooks-host.mjs)')
+  return found
 }
 
 function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
