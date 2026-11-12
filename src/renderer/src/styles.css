@@ -86,8 +86,15 @@ h4 { margin: 10px 0 4px; color: var(--muted); font-weight: 500; }
 .log .tag { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log.W { color: var(--warn-text); }
 .log.E, .log.F { color: var(--bad); }
-.toolbar { display: flex; gap: 6px; }
-.toolbar select { flex: 1; }
+.toolbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.toolbar select { flex: 1; min-width: 120px; }
+.toolbar label { display: flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 12px; }
+.detail-actions { display: flex; gap: 6px; padding: 6px 8px; flex-wrap: wrap; align-items: center; }
+.detail-actions input, .detail-actions textarea, .detail-actions select { min-width: 0; }
+.detail-edit { display: flex; flex-direction: column; gap: 6px; padding: 0 8px 8px; }
+.storage details { border-bottom: 1px solid var(--line); padding: 6px 0; }
+.storage summary { cursor: pointer; }
+.rules { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 8px 8px; }
 .screen { position: relative; flex: 1; display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; overflow: hidden; }
 .screen img, .screen canvas { max-height: 100%; max-width: 100%; border-radius: 18px; border: 2px solid #000; cursor: pointer; user-select: none; touch-action: none; outline: none; }
 .screen canvas.pending { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; border: 0; }

@@ -4,6 +4,13 @@ import { generateSPKIFingerprint } from 'mockttp'
 import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
 import { CAPTURE_PHONE, ensureAvd, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
+import { DeviceFrida } from './frida'
+import { fromHar } from './har'
+import { History } from './history'
+import { sendReplay, type ReplayEdit } from './replay'
+import { ProtoSchema } from './schema'
+import { ensureSdk } from './sdk'
+import { readAppStorage, type StorageEntry } from './storage'
 import { installApks, isPackageName, pullApp } from './store/apk'
 import { hasPlayStore, installPlayStore, needsPlayLicense, pullPlayStore } from './playstore'
 import { FEATURED, installFromFdroid, search as searchFdroid } from './store/fdroid'
@@ -13,10 +20,11 @@ import { Adb } from './adb'
 import { Attributor } from './attrib'
 import { Timeline } from './timeline'
 import { Logcat } from './logcat'
-import { CaptureProxy } from './proxy'
+import { CaptureProxy, summarize, type Exchange, type ExchangeSummary } from './proxy'
 import { Mirror } from './mirror'
-import { findSdk, type Sdk } from './sdk'
-import type { Device, LaunchResult, PhoneMode, Settings } from '../shared'
+import type { Sdk } from './sdk'
+import type { Device, LaunchOptions, LaunchResult, PhoneMode, Settings } from '../shared'
+import type { ProxyRule } from './rules'
 
 export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'root' | 'device' | 'route' | 'trust' | 'ready'
 export interface Progress {
@@ -37,6 +45,11 @@ export class Session extends EventEmitter {
   device: Adb | null = null
   screen: Mirror | null = null
   logcat: Logcat | null = null
+  readonly schema = new ProtoSchema()
+  private history: History | null = null
+  private frida: DeviceFrida | null = null
+  /** HAR files opened in this session, so their rows can be inspected like a live exchange. */
+  private opened = new Map<string, Exchange>()
   /** USB mode: the phone whose proxy setting we changed, and the port, to undo on stop. */
   private routed: { adb: Adb; port: number } | null = null
 
@@ -72,16 +85,19 @@ export class Session extends EventEmitter {
   }
 
   async start(): Promise<void> {
-    const sdk = await this.step('sdk', 'Finding Android SDK', async () => {
-      const found = findSdk()
-      if (!found) throw new Error('Android SDK not found. Install Android Studio or the command-line tools.')
-      return found
-    })
+    const sdk = await this.step('sdk', 'Finding Android SDK', () => ensureSdk(this.log))
     this.sdk = sdk
     const ca = await this.step('ca', 'Preparing local certificate', () => loadOrCreateCa(join(this.dataDir, 'ca')))
     this.ca = ca
     const port = await this.step('proxy', 'Starting capture proxy', () => this.proxy.start(ca, 8890))
     this.proxy.inputFor = (at) => this.timeline.match(at)
+    try {
+      this.history = new History(join(this.dataDir, 'history.sqlite'))
+      this.history.open()
+      this.proxy.persist = (exchange) => this.history?.save(exchange)
+    } catch (error) {
+      this.log(`Saved sessions are unavailable: ${(error as Error).message}`)
+    }
     this.log(`Proxy listening on 127.0.0.1:${port}`)
     const adb = this.mode === 'usb' ? await this.startUsb(sdk, ca, port) : await this.startVirtual(sdk, ca, port)
     this.device = adb
@@ -92,6 +108,7 @@ export class Session extends EventEmitter {
       this.log('Requests are tagged with the app that opened the socket.')
     }
     await this.attachScreen(adb)
+    await this.startFrida(adb)
     this.logcat = new Logcat(adb)
     this.logcat.on('lines', (lines) => this.emit('logcat', lines))
     this.logcat.start()
@@ -195,6 +212,7 @@ export class Session extends EventEmitter {
       await installPlayStore(adb, files, say)
       await adb.root()
       await this.trust(adb, this.ca!)
+      await this.frida?.start().catch((error: Error) => this.log(`Frida did not restart: ${error.message}`))
     } finally {
       this.logcat = new Logcat(adb)
       this.logcat.on('lines', (lines) => this.emit('logcat', lines))
@@ -308,8 +326,8 @@ export class Session extends EventEmitter {
       .sort()
   }
 
-  /** Restart an app so it starts in a process that sees our CA. */
-  async launch(pkg: string): Promise<LaunchResult> {
+  /** Restart an app so it starts in a process that sees our CA. With unpin, Frida spawns it. */
+  async launch(pkg: string, options?: LaunchOptions): Promise<LaunchResult> {
     if (!isPackageName(pkg)) throw new Error(`Invalid package name: ${pkg}`)
     const adb = this.requireAdb()
     let message: string | undefined
@@ -329,6 +347,14 @@ export class Session extends EventEmitter {
     if (!component.startsWith(`${pkg}/`)) throw new Error(`${pkg} has no launcher activity`)
     if (this.attrib) this.attrib.preferPkg = pkg
     await adb.shell(`am force-stop ${pkg}`)
+    if (options?.unpin) {
+      if (!this.frida) {
+        throw new Error('Certificate unpinning needs Frida on a rooted phone. It is not running for this session.')
+      }
+      const spawned = await this.frida.spawn(pkg)
+      const unpinNote = `${pkg} started with certificate unpinning.`
+      return { device: 'capture', pid: spawned.pid, message: message ? `${message} ${unpinNote}` : unpinNote }
+    }
     await adb.shell(`am start -n '${component}'`)
     await new Promise((r) => setTimeout(r, 1500))
     return { device: 'capture', pid: await this.pidOf(pkg), message }
@@ -351,7 +377,89 @@ export class Session extends EventEmitter {
     return this.device
   }
 
+  getExchange(id: string): Exchange | null {
+    const live = this.proxy.exchanges.get(id)
+    if (live) return live
+    return this.opened.get(id) ?? this.history?.find(id) ?? null
+  }
+
+  listRules(): ProxyRule[] {
+    return this.proxy.listRules()
+  }
+
+  addRule(input: Omit<ProxyRule, 'id'>): ProxyRule[] {
+    return this.proxy.addRule(input)
+  }
+
+  removeRule(id: string): ProxyRule[] {
+    return this.proxy.removeRule(id)
+  }
+
+  async replay(id: string, edit?: ReplayEdit): Promise<void> {
+    const exchange = this.getExchange(id)
+    if (!exchange) throw new Error('That request is gone')
+    const replayed = await sendReplay(exchange, edit)
+    this.proxy.record(replayed)
+  }
+
+  loadProto(file: string): string[] {
+    return this.schema.loadFile(file)
+  }
+
+  decodeSchema(id: string, side: 'request' | 'response', typeName: string): string {
+    const exchange = this.getExchange(id)
+    const bytes = side === 'request' ? exchange?.requestBytes : exchange?.responseBytes
+    if (!bytes) throw new Error('That body was not kept as protobuf bytes. Load the .proto and capture the call again.')
+    const type = side === 'response' ? (exchange?.contentType ?? '') : String(exchange?.requestHeaders['content-type'] ?? exchange?.contentType ?? '')
+    return this.schema.decode(bytes, type, typeName)
+  }
+
+  sessions() {
+    return this.history?.list() ?? []
+  }
+
+  searchSessions(query: string): ExchangeSummary[] {
+    return this.history?.search(query.trim()) ?? []
+  }
+
+  loadSession(id: string): ExchangeSummary[] {
+    return this.history?.load(id) ?? []
+  }
+
+  openHarText(text: string): ExchangeSummary[] {
+    const exchanges = fromHar(text)
+    for (const exchange of exchanges) this.opened.set(exchange.id, exchange)
+    return exchanges.map(summarize)
+  }
+
+  storage(pkg: string): Promise<StorageEntry[]> {
+    return readAppStorage(this.requireAdb(), pkg)
+  }
+
+  private async startFrida(adb: Adb): Promise<void> {
+    const uid = (await adb.shell('id -u').catch(() => '')).trim()
+    if (uid !== '0') {
+      this.log('Certificate unpinning stays off: this phone is not rooted.')
+      return
+    }
+    const frida = new DeviceFrida(adb, join(this.dataDir, 'frida'), (line) => {
+      this.log(line)
+      this.emit('store-log', line)
+    })
+    try {
+      await frida.start()
+      this.frida = frida
+    } catch (error) {
+      this.log(`Frida did not start: ${(error as Error).message}. Certificate unpinning is unavailable.`)
+      await frida.stop().catch(() => undefined)
+    }
+  }
+
   async stop(): Promise<void> {
+    await this.frida?.stop().catch(() => undefined)
+    this.frida = null
+    this.history?.close()
+    this.history = null
     this.attrib?.stop()
     this.attrib = null
     this.screen?.stop()

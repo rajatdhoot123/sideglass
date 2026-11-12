@@ -1,6 +1,7 @@
 # Sideglass: handoff and TODO
 
-Status updated 2026-11-07, after PRs #4, #5, #6 and #8 merged.
+Status updated 2026-11-12. Frida unpinning, saved sessions, request tools, schema decode,
+storage, and the unsigned release config are in the tree. Signing and a Windows run are not.
 Repo: https://github.com/rajatdhoot123/sideglass (public, Apache-2.0).
 Local folder on the original machine: `~/project/build-with-me`.
 
@@ -28,7 +29,10 @@ Use it on apps you build or are allowed to test. Keep it local only, with no clo
 | #8 | Test SMS goes to the phone on screen. One shared Play-phone startup. |
 | #11 | First run chooses a virtual phone or the user's own phone over USB. USB mode uses `adb reverse` and the global HTTP proxy, and restores both on quit. No root, so HTTPS bodies only for apps that trust a user CA. |
 
-Next roadmap item is **4.2 Frida certificate unpinning**. 4.3–4.6 are not started. USB mode still cannot see apps that ignore the system proxy.
+Roadmap 4.2–4.5 is implemented. 4.6 is implemented except README screenshots. 4.7 has the
+installer, Java fallback, electron-builder config, and CI. Signing, auto-update, a local
+disk-image check, and Windows are still open. USB mode still cannot see apps that ignore the
+system proxy, and it cannot run Frida without root.
 
 ### Layout
 
@@ -50,6 +54,12 @@ src/main/            Electron main process (Node)
                      and replaces the capture phone's LicenseChecker stub
   screen.ts          screenshot fallback: `screencap -p` loop + `input tap/swipe/keyevent/text`
   mirror.ts          scrcpy H.264 stream (Tango) with touch, scroll, and keyboard; falls back to screen.ts
+  frida.ts           frida-server download, push, and the Node host that spawns an app
+  history.ts         sqlite capture history (node:sqlite)
+  schema.ts          load a .proto and decode a body with protobufjs
+  replay.ts          send a captured request again from this computer
+  storage.ts         read an app's databases and shared_prefs
+  quiet.ts           send mockttp's console noise to sideglass.log
   keys.ts            DOM key codes to Android key codes
   logcat.ts          `logcat -v threadtime -T 1`, parsed, batched every 250 ms
   har.ts             HAR 1.2 export
@@ -173,31 +183,35 @@ Plan:
 
 Goal: apps that pin certificates (they appear in **Refused TLS**) can be read.
 
-- [ ] **Frida server:** download `frida-server-<ver>-android-<arm64|x86_64>.xz` from
+- [x] **Frida server:** download `frida-server-<ver>-android-<arm64|x86_64>.xz` from
       https://github.com/frida/frida/releases, push it to `/data/local/tmp/frida-server`,
       `chmod 755`, and start it as root at session start. The phone is already rooted.
-- [ ] **Host:** add the `frida` npm package (Node bindings; check it builds for this Electron
-      version, otherwise run the `frida` CLI / Python as a child process).
-- [ ] **Unpinning script:** write our own, or vendor
-      https://github.com/httptoolkit/frida-interception-and-unpinning **only after checking its
-      license** (it may be AGPL, which would force Sideglass's license). It must cover
-      `TrustManagerImpl`, OkHttp `CertificatePinner`, Conscrypt, `NetworkSecurityConfig` and
-      common libraries (Flutter needs a native hook).
-- [ ] **UI:** an **Unpin** switch per app on launch. "Launch app" then spawns via Frida
-      (`device.spawn(pkg)`, attach, load script, resume) instead of `monkey`.
-- [ ] **Refused TLS tab:** add a "Retry with unpinning" button per host/app.
-- [ ] **Done when:** an app known to pin, e.g. a sample from
-      https://github.com/httptoolkit/android-ssl-pinning-demo, shows its HTTPS calls in Requests.
-- [ ] **Docs:** state the limits. Apps with root or Frida detection, or Play Integrity checks,
-      may still refuse.
+      Pinned to 17.26.2 so the host library matches. Checked on emulator-5590.
+- [x] **Host:** the `frida` npm package does not load inside Electron (different Node ABI), so
+      `scripts/frida-host.mjs` runs under system Node and speaks JSON lines. `device.spawn`,
+      attach, load, resume.
+- [x] **Unpinning script:** our own, in `scripts/frida-agent`. The HTTP Toolkit script is AGPL
+      and was not vendored. It covers `TrustManagerImpl`, OkHttp `CertificatePinner`, Conscrypt,
+      `NetworkSecurityConfig`, TrustKit, Volley/WebView, and a delayed BoringSSL verify hook.
+      Defining a new Java trust manager with `Java.registerClass` was dropped: release apps
+      cannot load the generated dex.
+- [x] **UI:** an **Unpin** switch on launch. "Launch app" then spawns via Frida instead of
+      `am start`.
+- [x] **Refused TLS tab:** a "Retry with unpinning" button per host, once the app is known.
+- [x] **Done when:** `tech.httptoolkit.pinning_demo` 1.7.1 on emulator-5590, behind the capture
+      proxy. With Unpin, the config, context, OkHttp, TrustKit, and Flutter buttons reported
+      Success. Volley reached the server and got `ServerError` (not a certificate error).
+      Launching the same app with native hooks installed before resume crashed Flutter's raster
+      thread, so those hooks wait 1.5s.
+- [x] **Docs:** limits are in the README. Root or Frida detection, and Play Integrity, can still
+      refuse. Sideglass does not try to produce a Play Integrity verdict.
 
 ### 4.3 Requests tagged with the app that made them
 
 The proxy only sees TCP from the emulator, not the app. Options, best first:
-- [ ] **A (recommended):** a Frida script per launched app adds an `X-Sideglass-App: <pkg>`
-      header (hook OkHttp / HttpURLConnection) or reports socket connects (hook
-      `connect()`, sending (pkg, local port)). The proxy matches by source port and strips the
-      header before forwarding.
+- [x] **A (recommended):** while Unpin is on, the Frida script adds `X-Sideglass-App: <pkg>`
+      on OkHttp and `HttpURLConnection`. The proxy records the package and strips the header
+      before forwarding. Socket tagging (B) still covers launches that do not use Frida.
 - [x] **B (no Frida), shipped:** the virtual phone polls `/proc/net/tcp` and `tcp6` (root)
       and `pm list packages -U`. A request is tagged when one app uid has a socket to that
       address, or when the launched app does. Several apps on the same address stay blank.
@@ -218,20 +232,21 @@ The proxy only sees TCP from the emulator, not the app. Options, best first:
 - [x] Parse gRPC framing (5-byte header: compressed flag + length) and gunzip compressed frames.
 - [x] Decode protobuf **without a schema** (field numbers, wire types, nested messages,
       strings) and show it as a tree in the request and response body.
-- [ ] Optionally let the user load a `.proto` and decode with `protobufjs`.
-- [ ] Firestore and Google APIs traffic is the main test case.
+- [x] Optionally let the user load a `.proto` and decode with `protobufjs`.
+- [ ] Firestore and Google APIs traffic is the main test case. A `ListenRequest`-shaped fixture
+      is decoded in unit tests. Live Firestore traffic has not been captured.
 
 ### 4.6 Product polish (after the roadmap)
 
-- [ ] Packaging and releases: see 4.7.
-- [ ] Persist sessions in SQLite (`better-sqlite3`): search across sessions; open old HARs.
-- [ ] Request tools: copy as cURL, replay, edit-and-replay, block or mock a URL (mockttp rules
-      make this easy).
-- [ ] Storage tab: browse the launched app's SQLite databases and shared_prefs
-      (`run-as` / root `cp` to /data/local/tmp, then pull).
-- [ ] Silence mockttp's console noise; add an app log file.
-- [ ] Tests: unit tests for `subjectHashOld`, `packageFromPlayLink`, HAR export and log
-      parsing; CI running typecheck and build.
+- [x] Packaging and releases: see 4.7. Config and CI are in. Signing is not.
+- [x] Persist sessions in SQLite (Node's built-in `node:sqlite`, so Electron does not need a
+      native addon): search across sessions; open old HARs.
+- [x] Request tools: copy as cURL, replay, edit-and-replay, block or mock a URL.
+- [x] Storage tab: browse the launched app's SQLite databases and shared_prefs
+      (root `exec-out cat`, or `run-as` for a debuggable app). Not tried on a device yet.
+- [x] Silence mockttp's console noise; write it to `sideglass.log` in userData.
+- [x] Tests: unit tests for `subjectHashOld`, `packageFromPlayLink`, HAR export and log
+      parsing, plus the new pieces. CI runs typecheck, test, and build.
 - [ ] README screenshots and GIF (use `SIDEGLASS_SNAPSHOT`).
 
 ### 4.7 Downloadable release
@@ -242,29 +257,26 @@ repo or running `npm run dev`. Paths are already packaging-safe: data goes to
 
 Fix before the first public build:
 
-- [ ] **Android SDK missing.** Many users won't have it, and Google's SDK can't be bundled.
-      Add a first-run install: download Google's cmdline-tools to `~/.sideglass/android-sdk`
-      (already in `candidateRoots()`) and accept the licenses with the user's consent. Until
-      then, the README says "install Android Studio first".
-- [ ] **No Java when launched from Finder/Dock.** `sdkmanager` and `avdmanager` need Java. A GUI
-      launch doesn't load the shell profile, so `JAVA_HOME` is usually unset and first-run
-      setup can fail. When `JAVA_HOME` is unset, use Android Studio's bundled JBR
-      (`/Applications/Android Studio.app/Contents/jbr/Contents/Home` on macOS; `jbr/` under
-      the Android Studio install on Windows/Linux) and pass it in the env from `emulator.ts`.
-      `ANDROID_HOME` has the same GUI-launch problem, but `sdk.ts` already falls back to
-      the usual SDK paths.
+- [x] **Android SDK missing.** `ensureSdk` downloads Google's cmdline-tools build 15859902
+      into `~/.sideglass/android-sdk` and installs platform-tools, then the existing image
+      install accepts the licenses by answering yes. The download path was not run here,
+      because this machine already has an SDK. The setup log says Google's license applies.
+- [x] **No Java when launched from Finder/Dock.** When `JAVA_HOME` is unset, `sdkEnv` uses
+      Android Studio's bundled JBR and puts it on `PATH`. Unit-tested with a fake filesystem.
+      Not launched from Finder.
 - [ ] **Windows is untested.** `sdk.ts` handles `.exe`/`.bat`, but nothing has run there. Ship
       macOS and Linux first and label Windows experimental until someone runs a smoke test.
 
 Build and release:
 
-- [ ] Add `electron-builder` + `electron-builder.yml`: macOS `.dmg` (arm64 + x64), Windows
-      NSIS `.exe`, Linux `AppImage` + `.deb`.
+- [x] Add `electron-builder` + `electron-builder.yml`: macOS `.dmg`, Windows NSIS `.exe`,
+      Linux `AppImage` + `.deb`. macOS identity is null (unsigned).
 - [ ] Build an unsigned macOS `.dmg` locally and check the packaged app finds the SDK and Java
       when opened from Finder.
-- [ ] GitHub Actions workflow: on a `v*` tag, build on macOS, Windows and Linux runners and
-      upload the files to a GitHub Release.
-- [ ] Until signing is set up: the README tells macOS users to run
+- [x] GitHub Actions workflow: `.github/workflows/ci.yml` typechecks, tests, and builds.
+      `.github/workflows/release.yml` on a `v*` tag packs macOS, Windows, and Linux and uploads
+      the files as artifacts (not a published GitHub Release, until signing exists).
+- [x] Until signing is set up: the README tells macOS users to run
       `xattr -cr /Applications/Sideglass.app`, and Windows users to click past SmartScreen.
 
 Signing (when the Apple Developer account exists):

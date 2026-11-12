@@ -48,8 +48,9 @@ export function decodeProtobuf(buf: Buffer, depth = 0): ProtoField[] | null {
   return fields
 }
 
-export function decodeGrpc(buf: Buffer): ProtoField[][] | null {
-  const frames: ProtoField[][] = []
+/** One uncompressed protobuf message per gRPC frame. Null when the framing is wrong. */
+export function grpcFrames(buf: Buffer): Buffer[] | null {
+  const frames: Buffer[] = []
   let o = 0
   while (o + 5 <= buf.length) {
     const flag = buf[o]
@@ -65,12 +66,22 @@ export function decodeGrpc(buf: Buffer): ProtoField[][] | null {
     } else if (flag !== 0) {
       return null
     }
-    const fields = decodeProtobuf(payload)
-    if (!fields) return null
-    frames.push(fields)
+    frames.push(payload)
   }
   if (o !== buf.length || frames.length === 0) return null
   return frames
+}
+
+export function decodeGrpc(buf: Buffer): ProtoField[][] | null {
+  const frames = grpcFrames(buf)
+  if (!frames) return null
+  const decoded: ProtoField[][] = []
+  for (const payload of frames) {
+    const fields = decodeProtobuf(payload)
+    if (!fields) return null
+    decoded.push(fields)
+  }
+  return decoded
 }
 
 export function formatFields(fields: ProtoField[], depth = 0): string {

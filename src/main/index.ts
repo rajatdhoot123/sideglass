@@ -1,13 +1,17 @@
-import { writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme } from 'electron'
-import type { KeyEvent } from '../shared'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme } from 'electron'
+import type { KeyEvent, Settings } from '../shared'
+import type { ReplayEdit } from './replay'
+import type { ProxyRule } from './rules'
 import { toHar } from './har'
+import { publicExchange } from './proxy'
+import { appendLog, installQuietLog } from './quiet'
 import { Session } from './session'
 import { loadSettings, saveSettings } from './settings'
-import { findSdk } from './sdk'
+import { findSdk, sdkAt } from './sdk'
 import { usbPhones } from './store/usb'
-import type { Settings } from '../shared'
 
 let session: Session | null = null
 let window: BrowserWindow | null = null
@@ -46,7 +50,10 @@ ipcMain.handle('session:start', async () => {
   const current = new Session(join(app.getPath('userData'), 'data'), settings)
   session = current
   current.on('progress', (p) => send('progress', p))
-  current.on('setup-log', (l) => send('setup-log', l))
+  current.on('setup-log', (l) => {
+    send('setup-log', l)
+    appendLog(join(app.getPath('userData'), 'sideglass.log'), l)
+  })
   current.on('frame', (png: Buffer) => send('frame', 'capture', new Uint8Array(png)))
   current.on('play-frame', (png: Buffer) => send('frame', 'play', new Uint8Array(png)))
   current.on('video', (packet) => send('video', 'capture', packet))
@@ -76,7 +83,10 @@ ipcMain.handle('settings:save', async (_, settings: Settings) => {
   return saveSettings(settingsFile(), settings)
 })
 ipcMain.handle('cert:open-settings', () => requireSession().openCertificateSettings())
-ipcMain.handle('exchange:get', (_, id: string) => requireSession().proxy.exchanges.get(id) ?? null)
+ipcMain.handle('exchange:get', (_, id: string) => {
+  const exchange = requireSession().getExchange(id)
+  return exchange ? publicExchange(exchange) : null
+})
 ipcMain.handle('capture:clear', () => {
   const current = requireSession()
   current.proxy.clear()
@@ -169,13 +179,44 @@ ipcMain.handle('play:install', (_, link: string) => requireSession().installFrom
 ipcMain.handle('play:cancel', () => requireSession().cancelPlay())
 // Also used before any session exists (first-run choice, settings), so it only needs the SDK.
 ipcMain.handle('usb:phones', () => {
-  const sdk = findSdk()
-  return sdk ? usbPhones(sdk.adb) : []
+  const sdk = findSdk() ?? sdkAt(join(homedir(), '.sideglass', 'android-sdk'))
+  return sdk && existsSync(sdk.adb) ? usbPhones(sdk.adb) : []
 })
 ipcMain.handle('usb:apps', (_, serial: string) => requireSession().usbApps(serial))
 ipcMain.handle('usb:install', (_, serial: string, pkg: string) => requireSession().installFromUsb(serial, pkg))
 ipcMain.handle('apps:list', () => requireSession().packages())
-ipcMain.handle('app:launch', (_, pkg: string) => requireSession().launch(pkg))
+ipcMain.handle('app:launch', (_, pkg: string, options?: { unpin?: boolean }) => requireSession().launch(pkg, options))
+ipcMain.handle('clipboard:write', (_, text: string) => {
+  if (typeof text !== 'string' || text.length > 1_000_000) throw new Error('Nothing to copy')
+  clipboard.writeText(text)
+})
+ipcMain.handle('request:replay', (_, id: string, edit?: ReplayEdit) => requireSession().replay(id, edit))
+ipcMain.handle('rule:list', () => requireSession().listRules())
+ipcMain.handle('rule:add', (_, rule: Omit<ProxyRule, 'id'>) => requireSession().addRule(rule))
+ipcMain.handle('rule:remove', (_, id: string) => requireSession().removeRule(id))
+ipcMain.handle('proto:load', async () => {
+  const picked = await dialog.showOpenDialog({
+    title: 'Load a .proto file',
+    filters: [{ name: 'Protocol buffer', extensions: ['proto'] }],
+    properties: ['openFile'],
+  })
+  if (picked.canceled || !picked.filePaths[0]) return []
+  return requireSession().loadProto(picked.filePaths[0])
+})
+ipcMain.handle('proto:decode', (_, id: string, side: 'request' | 'response', typeName: string) => requireSession().decodeSchema(id, side, typeName))
+ipcMain.handle('history:list', () => requireSession().sessions())
+ipcMain.handle('history:search', (_, query: string) => requireSession().searchSessions(query))
+ipcMain.handle('history:load', (_, id: string) => requireSession().loadSession(id))
+ipcMain.handle('har:open', async () => {
+  const picked = await dialog.showOpenDialog({
+    title: 'Open a HAR file',
+    filters: [{ name: 'HAR', extensions: ['har'] }],
+    properties: ['openFile'],
+  })
+  if (picked.canceled || !picked.filePaths[0]) return null
+  return requireSession().openHarText(readFileSync(picked.filePaths[0], 'utf8'))
+})
+ipcMain.handle('storage:list', (_, pkg: string) => requireSession().storage(pkg))
 ipcMain.handle('sms:send', (_, device: Device, from: string, text: string) => requireSession().sendSms(device, from, text))
 ipcMain.handle('har:export', async () => {
   const s = requireSession()
@@ -186,6 +227,9 @@ ipcMain.handle('har:export', async () => {
 })
 
 app.whenReady().then(() => {
+  const logFile = join(app.getPath('userData'), 'sideglass.log')
+  installQuietLog(logFile)
+  appendLog(logFile, `Sideglass ${new Date().toISOString()}`)
   createWindow()
   nativeTheme.on('updated', () => {
     if (window && !window.isDestroyed()) window.setBackgroundColor(windowColor())

@@ -1,11 +1,14 @@
 import type { LogLine } from './main/logcat'
 import type { PhoneInput } from './main/timeline'
 import type { ExchangeSummary, Exchange, TlsFailure } from './main/proxy'
+import type { ProxyRule } from './main/rules'
+import type { ReplayEdit } from './main/replay'
 import type { Progress } from './main/session'
+import type { StorageEntry } from './main/storage'
 import type { StoreApp } from './main/store/fdroid'
 import type { UsbPhone } from './main/store/usb'
 
-export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput }
+export type { LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput, ProxyRule, ReplayEdit, StorageEntry }
 export type Device = 'capture' | 'play'
 /** Which phone Sideglass captures: its own rooted emulator, or the user's phone over USB. */
 export type PhoneMode = 'virtual' | 'usb'
@@ -19,6 +22,15 @@ export interface LaunchResult {
   pid: number | null
   /** Something the user has to do, shown instead of the usual status. */
   message?: string
+}
+export interface LaunchOptions {
+  /** Spawn the app with Frida so certificate checks do not reject the capture proxy. */
+  unpin?: boolean
+}
+export interface SavedSession {
+  id: string
+  startedAt: number
+  count: number
 }
 export type ScreenMode = 'video' | 'frames'
 
@@ -75,7 +87,19 @@ export interface Api {
   installFromUsb(serial: string, pkg: string): Promise<string>
   pathForFile(file: File): string
   apps(): Promise<string[]>
-  launch(pkg: string): Promise<LaunchResult>
+  launch(pkg: string, options?: LaunchOptions): Promise<LaunchResult>
+  copyText(text: string): Promise<void>
+  replay(id: string, edit?: ReplayEdit): Promise<void>
+  rules(): Promise<ProxyRule[]>
+  addRule(rule: Omit<ProxyRule, 'id'>): Promise<ProxyRule[]>
+  removeRule(id: string): Promise<ProxyRule[]>
+  loadProto(): Promise<string[]>
+  decodeSchema(id: string, side: 'request' | 'response', typeName: string): Promise<string>
+  sessions(): Promise<SavedSession[]>
+  searchSessions(query: string): Promise<ExchangeSummary[]>
+  loadSession(id: string): Promise<ExchangeSummary[]>
+  openHar(): Promise<ExchangeSummary[] | null>
+  storage(pkg: string): Promise<StorageEntry[]>
   sendSms(device: Device, from: string, text: string): Promise<void>
   exportHar(): Promise<string | null>
   on(channel: 'progress', cb: (p: Progress) => void): () => void

@@ -9,11 +9,14 @@ export function Phone({
   activeDevice,
   onActiveDevice,
   onLaunched,
+  unpinRequest,
 }: {
   mode: PhoneMode
   activeDevice: Device
   onActiveDevice: (device: Device) => void
   onLaunched: (pid: number | null, pkg?: string) => void
+  /** Set when Refused TLS asks to relaunch an app with unpinning. */
+  unpinRequest: { pkg: string; n: number } | null
 }) {
   const [adding, setAdding] = useState(false)
   const [apps, setApps] = useState<string[]>([])
@@ -21,9 +24,25 @@ export function Phone({
   const [smsFrom, setSmsFrom] = useState('VM-HDFCBK')
   const [smsText, setSmsText] = useState('Rs.500.00 debited from A/c XX1234 on 07-11-26 to ZOMATO. UPI Ref 512345678901')
   const [dragging, setDragging] = useState(false)
+  const [unpin, setUnpin] = useState(false)
   useEffect(() => void window.api.apps().then(setApps), [])
   // Long steps (such as putting Google Play on the phone for a licensed app) report progress here.
   useEffect(() => window.api.on('store-log', (line) => setStatus(line)), [])
+
+  const start = async (pkg: string, unpinning = unpin) => {
+    setStatus(`Starting ${pkg}${unpinning ? ' with unpinning' : ''}…`)
+    try {
+      showLaunch(pkg, await window.api.launch(pkg, { unpin: unpinning }), `${pkg} did not start`)
+    } catch (error) {
+      setStatus(`Could not start ${pkg}: ${(error as Error).message}`)
+    }
+  }
+
+  useEffect(() => {
+    if (!unpinRequest) return
+    setUnpin(true)
+    void start(unpinRequest.pkg, true)
+  }, [unpinRequest?.n])
 
   const showLaunch = (pkg: string, result: LaunchResult, idle: string) => {
     onActiveDevice(result.device)
@@ -62,14 +81,8 @@ export function Phone({
       <div className="toolbar">
         <select
           defaultValue=""
-          onChange={async (e) => {
-            if (!e.target.value) return
-            setStatus(`Starting ${e.target.value}…`)
-            try {
-              showLaunch(e.target.value, await window.api.launch(e.target.value), `${e.target.value} did not start`)
-            } catch (error) {
-              setStatus(`Could not start ${e.target.value}: ${(error as Error).message}`)
-            }
+          onChange={(e) => {
+            if (e.target.value) void start(e.target.value)
           }}
         >
           <option value="">Launch app…</option>
@@ -77,6 +90,10 @@ export function Phone({
             <option key={a}>{a}</option>
           ))}
         </select>
+        <label title="Spawn the next app with Frida so it does not reject Sideglass's certificate. Needs the rooted virtual phone. Apps that detect Frida, or that require Play Integrity, can still refuse.">
+          <input type="checkbox" checked={unpin} onChange={(e) => setUnpin(e.target.checked)} />
+          Unpin
+        </label>
         <button onClick={() => void window.api.apps().then(setApps)}>↻</button>
         {activeDevice === 'play' && (
           <button
@@ -102,12 +119,7 @@ export function Phone({
             if (!pkg || !open) return
             // Close the dialog and open the app on the device that can run it.
             setAdding(false)
-            setStatus(`Starting ${pkg}…`)
-            try {
-              showLaunch(pkg, await window.api.launch(pkg), `${pkg} installed; it did not start by itself`)
-            } catch (error) {
-              setStatus(`Could not start ${pkg}: ${(error as Error).message}`)
-            }
+            void start(pkg)
           }}
         />
       )}

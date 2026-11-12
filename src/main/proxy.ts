@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events'
 import * as mockttp from 'mockttp'
+import { takeAppHeader } from './app-header'
 import type { CaFiles } from './certificate'
 import { presentBody } from './protobody'
+import { findRule, type ProxyRule } from './rules'
 
 /** One HTTP exchange as the UI shows it. Bodies are kept as text when they decode as UTF-8. */
 export interface Exchange {
@@ -27,6 +29,9 @@ export interface Exchange {
   app?: string
   /** Input this request followed, when it started within two seconds. */
   inputId?: string
+  /** Raw body when it is protobuf or gRPC, so a loaded .proto can decode it. Not sent to the window. */
+  requestBytes?: Buffer
+  responseBytes?: Buffer
 }
 
 /** A TLS handshake the app refused: usually certificate pinning. */
@@ -35,22 +40,41 @@ export interface TlsFailure {
   at: number
   host: string
   cause: string
+  /** Package that owned the socket, when the phone's TCP table could say. */
+  app?: string
 }
 
-export type ExchangeSummary = Omit<Exchange, 'requestHeaders' | 'requestBody' | 'responseHeaders' | 'responseBody'>
+export type ExchangeSummary = Omit<
+  Exchange,
+  'requestHeaders' | 'requestBody' | 'responseHeaders' | 'responseBody' | 'requestBytes' | 'responseBytes'
+>
+
+/** Drop raw protobuf bytes before a value crosses IPC. */
+export function publicExchange(exchange: Exchange): Omit<Exchange, 'requestBytes' | 'responseBytes'> {
+  const { requestBytes: _requestBytes, responseBytes: _responseBytes, ...rest } = exchange
+  return rest
+}
 
 const MAX_EXCHANGES = 5000
 
 async function bodyText(
   body: { getDecodedBuffer(): Promise<Buffer | undefined>; buffer: Buffer },
   contentType: string,
-): Promise<{ text?: string; size: number }> {
+): Promise<{ text?: string; size: number; bytes?: Buffer }> {
   const decoded = (await body.getDecodedBuffer().catch(() => undefined)) ?? body.buffer
-  return presentBody(decoded, contentType)
+  const presented = presentBody(decoded, contentType)
+  return { ...presented, bytes: keepBytes(decoded, contentType) }
+}
+
+function keepBytes(buf: Buffer, type: string): Buffer | undefined {
+  const kind = type.toLowerCase()
+  if (buf.length === 0 || buf.length > 2 * 1024 * 1024) return undefined
+  if (!kind.includes('grpc') && !kind.includes('protobuf')) return undefined
+  return buf
 }
 
 export function summarize(e: Exchange): ExchangeSummary {
-  const { requestHeaders: _a, requestBody: _b, responseHeaders: _c, responseBody: _d, ...rest } = e
+  const { requestHeaders: _a, requestBody: _b, responseHeaders: _c, responseBody: _d, requestBytes: _e, responseBytes: _f, ...rest } = e
   return rest
 }
 
@@ -66,6 +90,9 @@ export class CaptureProxy extends EventEmitter {
   lookupApp?: (host: string, port: number) => Promise<string | undefined>
   /** Input id for a request that started at this time. */
   inputFor?: (at: number) => string | undefined
+  /** Called with the full exchange whenever it is recorded or updated. */
+  persist?: (exchange: Exchange) => void
+  private rules: ProxyRule[] = []
 
   get port(): number {
     if (!this.server) throw new Error('proxy not started')
@@ -80,13 +107,33 @@ export class CaptureProxy extends EventEmitter {
       recordTraffic: false,
     })
     await server.start(port ? { startPort: port, endPort: port + 50 } : undefined)
-    await server.forAnyRequest().thenPassThrough({ ignoreHostHttpsErrors: false })
+    // A block or mock matches ahead of this fallback. The header from a Frida-launched app is removed here.
+    await server.forAnyRequest().matching((req) => findRule(this.rules, req.url) !== undefined).thenCallback((req) => {
+      const rule = findRule(this.rules, req.url)
+      if (!rule || rule.kind === 'block') return { statusCode: 403, statusMessage: 'Blocked', body: 'Blocked by Sideglass' }
+      return {
+        statusCode: rule.status ?? 200,
+        body: rule.body ?? '',
+        headers: { 'content-type': rule.contentType ?? 'text/plain' },
+      }
+    })
+    await server.forUnmatchedRequest().thenPassThrough({
+      ignoreHostHttpsErrors: false,
+      beforeRequest: (req) => {
+        const headers = { ...req.headers }
+        takeAppHeader(headers)
+        return { headers }
+      },
+    })
     await server.forAnyWebSocket().thenPassThrough()
 
     await server.on('request', async (req) => {
       const url = new URL(req.url)
       const type = String(req.headers['content-type'] ?? '')
       const body = await bodyText(req.body, type)
+      const headers = { ...req.headers }
+      const app = takeAppHeader(headers)
+      const raw = body.bytes
       const e: Exchange = {
         id: req.id,
         startedAt: req.timingEvents.startTime,
@@ -95,17 +142,19 @@ export class CaptureProxy extends EventEmitter {
         host: url.host,
         path: url.pathname + url.search,
         httpVersion: req.httpVersion,
-        requestHeaders: req.headers,
+        requestHeaders: headers,
         requestBody: body.text,
         requestBodySize: body.size,
+        requestBytes: raw,
         state: 'pending',
+        app,
         inputId: this.inputFor?.(req.timingEvents.startTime),
       }
       this.exchanges.set(e.id, e)
       this.trim()
-      this.emit('exchange', summarize(e))
-      const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80)
-      void this.tagApp(e, url.hostname, port)
+      this.touch(e)
+      const destPort = Number(url.port) || (url.protocol === 'https:' ? 443 : 80)
+      if (!app) void this.tagApp(e, url.hostname, destPort)
     })
     await server.on('response', async (res) => {
       const e = this.exchanges.get(res.id)
@@ -117,16 +166,17 @@ export class CaptureProxy extends EventEmitter {
       e.responseBody = body.text
       e.responseBodySize = body.size
       e.contentType = String(res.headers['content-type'] ?? '')
+      e.responseBytes = body.bytes
       const t = res.timingEvents
       e.durationMs = t.responseSentTimestamp ? Math.round(t.responseSentTimestamp - t.startTimestamp) : undefined
       e.state = 'done'
-      this.emit('exchange', summarize(e))
+      this.touch(e)
     })
     await server.on('abort', (req) => {
       const e = this.exchanges.get(req.id)
       if (!e) return
       e.state = 'aborted'
-      this.emit('exchange', summarize(e))
+      this.touch(e)
     })
     await server.on('tls-client-error', (failure) => {
       const host = failure.tlsMetadata?.sniHostname ?? failure.destination?.hostname ?? failure.remoteIpAddress ?? 'unknown host'
@@ -134,6 +184,7 @@ export class CaptureProxy extends EventEmitter {
       this.tlsFailures.push(entry)
       if (this.tlsFailures.length > 1000) this.tlsFailures.shift()
       this.emit('tls-failure', entry)
+      void this.tagFailure(entry)
     })
     this.server = server
     return server.port
@@ -142,6 +193,34 @@ export class CaptureProxy extends EventEmitter {
   clear(): void {
     this.exchanges.clear()
     this.tlsFailures.length = 0
+  }
+
+  listRules(): ProxyRule[] {
+    return this.rules.slice()
+  }
+
+  addRule(input: Omit<ProxyRule, 'id'>): ProxyRule[] {
+    const pattern = input.pattern.trim()
+    if (!pattern || pattern.length > 2000 || /[\r\n]/.test(pattern)) throw new Error('Give a URL or host to match')
+    this.rules.push({ ...input, pattern, id: `${Date.now()}-${this.rules.length}` })
+    return this.listRules()
+  }
+
+  removeRule(id: string): ProxyRule[] {
+    this.rules = this.rules.filter((rule) => rule.id !== id)
+    return this.listRules()
+  }
+
+  /** A request this computer sent again, shown in the same list as phone traffic. */
+  record(exchange: Exchange): void {
+    this.exchanges.set(exchange.id, exchange)
+    this.trim()
+    this.touch(exchange)
+  }
+
+  bytes(id: string, side: 'request' | 'response'): Buffer | undefined {
+    const exchange = this.exchanges.get(id)
+    return side === 'request' ? exchange?.requestBytes : exchange?.responseBytes
   }
 
   /** Ask again once: the socket poll can land a moment after the request. */
@@ -154,7 +233,26 @@ export class CaptureProxy extends EventEmitter {
     }
     if (!app || e.app || !this.exchanges.has(e.id)) return
     e.app = app
-    this.emit('exchange', summarize(e))
+    this.touch(e)
+  }
+
+  private async tagFailure(entry: TlsFailure): Promise<void> {
+    if (!this.lookupApp) return
+    const hostname = entry.host.replace(/:\d+$/, '')
+    const port = Number(entry.host.split(':')[1]) || 443
+    let app = await this.lookupApp(hostname, port).catch(() => undefined)
+    if (!app) {
+      await new Promise((r) => setTimeout(r, 400))
+      app = await this.lookupApp(hostname, port).catch(() => undefined)
+    }
+    if (!app) return
+    entry.app = app
+    this.emit('tls-failure', entry)
+  }
+
+  private touch(exchange: Exchange): void {
+    this.persist?.(exchange)
+    this.emit('exchange', summarize(exchange))
   }
 
   async stop(): Promise<void> {

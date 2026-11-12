@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node node_modules/electron/install.js
+      # The frida prebuild is only needed to compile the unpinning agent. Tests skip that when it is absent.
+      - run: node node_modules/frida/scripts/install.js || true
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build

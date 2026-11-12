@@ -4,7 +4,7 @@ import { homedir, arch } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { Adb } from './adb'
-import type { Sdk } from './sdk'
+import { sdkEnv, type Sdk } from './sdk'
 
 const run = promisify(execFile)
 
@@ -104,10 +104,6 @@ function playStoreRuntimeEnabled(spec: PhoneSpec): boolean {
 
 export function imageInstalled(sdk: Sdk, spec: PhoneSpec): boolean {
   return existsSync(join(sdk.root, 'system-images', `android-${API_LEVEL}`, spec.tag, IMAGE_ABI))
-}
-
-function sdkEnv(sdk: Sdk): NodeJS.ProcessEnv {
-  return { ...process.env, ANDROID_HOME: sdk.root, ANDROID_SDK_ROOT: sdk.root }
 }
 
 /** Download the system image if needed (accepting Google's SDK licenses) and create the AVD. */

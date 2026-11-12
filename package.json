@@ -9,7 +9,8 @@
     "start": "electron-vite preview",
     "typecheck": "tsc -p .",
     "smoke": "tsx scripts/smoke.mts",
-    "test": "tsx --test src/main/procnet.test.ts src/main/protobody.test.ts src/main/timeline.test.ts"
+    "test": "tsx --test src/main/*.test.ts",
+    "pack": "electron-builder --publish never"
   },
   "license": "Apache-2.0",
   "type": "commonjs",
@@ -19,6 +20,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.2.1",
     "electron": "^45.2.3",
+    "electron-builder": "^26.18.0",
     "electron-vite": "^6.0.0",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
@@ -32,7 +34,10 @@
     "@yume-chan/scrcpy": "^2.3.0",
     "@yume-chan/scrcpy-decoder-webcodecs": "^2.5.3",
     "@yume-chan/stream-extra": "^2.6.1",
+    "frida": "17.26.2",
+    "frida-java-bridge": "^7.0.13",
     "mockttp": "^4.6.5",
+    "protobufjs": "^8.8.1",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   }
