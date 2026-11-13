@@ -19,10 +19,13 @@ left; the phone is on the right, and you click and drag on it to use it.
     an app talks to, but HTTPS contents only for apps that trust user certificates (Chrome, or a
     debug build of your own app). Install `Download/sideglass-ca.crt` on the phone as a CA
     certificate for those.
-- **One-click setup:** finds the Android SDK, downloads the Google APIs system image if
-  needed, creates the virtual phone, boots it with no window, gets root, and installs the
-  CA as a system certificate (Android 14+ Conscrypt store included, in every app's mount
-  namespace, so running apps pick it up without a restart).
+- **One-click setup:** finds the Android SDK, downloads the Play Store system image if
+  needed, creates the virtual phone and boots it with no window. It then roots the phone with
+  [Magisk](https://github.com/topjohnwu/Magisk): the official Magisk APK (pinned version,
+  checked against its published SHA-256) is downloaded, the phone's boot ramdisk is patched once
+  and cached, and the phone restarts on it. Finally the CA is installed as a system certificate
+  (Android 14+ Conscrypt store included, in every app's mount namespace, so running apps pick it
+  up without a restart).
 - **Requests:** method, status, app, host, path, size and time; request/response bodies (JSON
   pretty-printed, protobuf and gRPC as a field tree) and headers. A filter, an app filter, and a
   "hide Google system traffic" switch.
@@ -35,14 +38,14 @@ left; the phone is on the right, and you click and drag on it to use it.
   If the video stream cannot start, it falls back to screenshots (click = tap, drag = swipe).
 - **Add apps** (the **+ Add app** button):
   - **App store:** search and install free apps from F-Droid, with a featured shelf.
-  - **Play Store link:** paste a link; Sideglass opens it on a second virtual phone that has
-    the Play Store. Sign in there once with your own Google account and tap Install. The
-    app's APK files (base and splits) are copied to the capture phone. Nothing comes from
-    third-party APK sites.
+  - **Play Store link:** paste a link and Sideglass opens it in the Play Store on the capture
+    phone itself, then taps Install for you. You only step in for what only you can do: signing
+    in once with your own Google account, prompts, or paid apps. Nothing comes from third-party
+    APK sites.
   - **From my phone:** pick an app on a USB-connected phone (USB debugging on) to copy it over.
   - **APK file:** drop APKs on the phone (split APKs together).
-- **Launch** an installed app from the list. **Unpin** spawns it with Frida so certificate
-  pinning does not hide its HTTPS calls when Hooks are off. The script is Sideglass's own.
+- **Launch** an installed app from the list. With Hooks off, tick **Unpin** to spawn it with
+  only Sideglass's own unpinning script.
 - **Requests tools:** copy as cURL, replay, edit and replay, block a URL, or answer it with a
   mock body. Load a `.proto` to decode a protobuf or gRPC body with a schema.
 - **Saved sessions:** captures are kept in a local SQLite file. Search them, open one, or open
@@ -67,7 +70,7 @@ left; the phone is on the right, and you click and drag on it to use it.
   signature, Google sign-in, Play licensing or Play Integrity may refuse to run as a clone. Push
   notifications (FCM) need the new package added to the app's Firebase project.
 - **Apps that check their Google Play licence** (PairIP, LVL): the capture phone is a Play Store
-  image. Sign in to Google Play there once with the account that has the app.
+  image, so they run there. Sign in to Google Play once with the account that has the app.
 - **Logs:** logcat, filtered to the launched app.
 - **Test SMS:** send an SMS from any sender to the phone.
 - **Export HAR** for Chrome DevTools, Charles, Insomnia and the like.
@@ -75,20 +78,25 @@ left; the phone is on the right, and you click and drag on it to use it.
 
 ## Run it
 
-Needs Node 20+ and the Android SDK (Android Studio, or the command-line tools), with
-hardware virtualisation on. Apple Silicon and x86_64 both work.
+Needs Node 22+, [pnpm](https://pnpm.io) 11, and the Android SDK (Android Studio, or the
+command-line tools), with hardware virtualisation on. Apple Silicon and x86_64 both work.
+Java is only needed for **Clone app**.
 
 ```bash
-npm install
-node node_modules/electron/install.js   # npm 11 does not run install scripts
-node node_modules/frida/scripts/install.js
-npm run dev        # development, with hot reload
-npm test
-npm run smoke      # headless check: boot, trust, open a page, expect it captured
+pnpm install       # also runs the Electron and Frida install steps (see pnpm-workspace.yaml)
+pnpm dev           # development, with hot reload
+pnpm test
+pnpm typecheck
+pnpm smoke         # headless check: boot, trust, open a page, expect it captured
+pnpm build && pnpm pack   # unsigned installers in release/
 ```
 
-The first run downloads the `system-images;android-35;google_apis;<abi>` image (~1.5 GB)
-and creates an AVD named `sideglass_api35`, on port 5590.
+The first run downloads the `system-images;android-35;google_apis_playstore;<abi>` image
+(~1.5 GB) and creates an AVD named `sideglass_play_api35`, on port 5590. The capture proxy
+listens on 8890. Sideglass keeps its CA, Magisk files, signing key and saved sessions in the
+Electron user-data folder.
+
+Pushing a `v*` tag builds macOS, Linux and Windows packages in GitHub Actions.
 
 ## How it works
 
@@ -96,28 +104,26 @@ and creates an AVD named `sideglass_api35`, on port 5590.
 |---|---|
 | Desktop shell | Electron + React + TypeScript (electron-vite) |
 | Capture proxy | [mockttp](https://github.com/httptoolkit/mockttp) (Apache-2.0): HTTPS interception, HTTP/2, WebSockets; unknown protocols passed through |
-| Routing | The emulator's `-http-proxy`, so every app's TCP goes through the proxy, including apps that ignore the system proxy setting |
+| Virtual phone | A `google_apis_playstore` API 35 emulator, started with `-writable-system` and a Magisk-patched ramdisk |
+| Root | [Magisk](https://github.com/topjohnwu/Magisk) (GPL-3.0), downloaded from its official release at runtime and never bundled. The ramdisk patch is Sideglass's own code (`src/main/magisk.ts`) |
+| Routing | The emulator's `-http-proxy`, so every app's TCP goes through the proxy, including apps that ignore the system proxy setting. USB phones use `adb reverse` and the global proxy setting |
 | Trust | A generated CA, mounted over `/system/etc/security/cacerts` and `/apex/com.android.conscrypt/cacerts` on a tmpfs; nothing on the system image changes |
-| Launch hooks | [Frida](https://frida.re) server pushed to the virtual phone on first hooked launch (pinned version, non-standard port) and our own agent (`src/main/agent.ts`) |
+| App tagging | Each request's socket is matched to its app through `/proc/net` on the phone |
+| Launch hooks and unpinning | [Frida](https://frida.re) 17.26.2 (wxWindows Library Licence). `frida-server` is downloaded on first use and pushed to the phone (non-standard port). The host library runs under system Node (`scripts/hooks-host.mjs`, `scripts/frida-host.mjs`), because Electron's Node ABI is different. The agent (`src/main/agent.ts`) and unpinning script are original; the HTTP Toolkit script is AGPL and is not included |
 | Screen | [scrcpy](https://github.com/Genymobile/scrcpy) server (Apache-2.0, downloaded on first use) via [Tango](https://tangoadb.dev/scrcpy/) (MIT): H.264, decoded with WebCodecs. Screenshots if the stream cannot start |
-| Unpinning | [Frida](https://frida.re) 17.26.2 (wxWindows Library Licence). `frida-server` is downloaded on first use. The host library runs in a Node child process, because Electron's Node ABI is different. The unpinning script is original; the HTTP Toolkit script is AGPL and is not included |
+| Clone app | Binary manifest and resource table rewritten in place; [apktool](https://apktool.org) only when the dex has the names too; SDK `zipalign` and `apksigner` |
+| History | `node:sqlite` |
 
 ## Limits
 
-- The virtual phone is a Play Store image rooted with Magisk. Paid apps and apps Google does
-  not offer on that image cannot be installed.
-- Signing in to Google Play on the capture phone goes through the capture proxy. A host that
-  refuses the proxy shows under Refused TLS and the sign-in cannot finish until that is bypassed.
-- Play Integrity verdicts that an app's server verifies with Google cannot be changed from the phone.
-  The hooks only rewrite a verdict the app reads locally, and that refusal is named in the phone panel.
-- Some apps still detect Frida or root. The hooks hide the common checks, and a determined check can still refuse.
-- Apps that pin below the hooks still show up under Refused TLS.
-- On the virtual phone, a request is tagged with the app that owned the socket when that can be told apart. USB phones are not tagged.
-- The virtual phone has Bluetooth switched off: the emulator's Bluetooth simulation does not
-  always start on a boot, and Android would then pop a "Bluetooth keeps stopping" dialog every
-  few seconds. Nothing Sideglass captures needs Bluetooth.
-- gRPC and protobuf bodies are shown as a field tree. Load a `.proto` to decode with a schema.
-- A downloadable build is configured (`electron-builder.yml`, unsigned). macOS users run
+- Apps Google Play does not offer on the emulator's device profile cannot be installed from a link.
+  Use an APK file or **From my phone** for those.
+- Play Integrity verdicts that an app's server checks with Google cannot be changed, and a
+  determined root, Frida or pinning check can still win. The phone panel names the refusal.
+- USB phones have no root: no hooks, no unpinning, no per-app tagging, HTTPS bodies only for
+  apps that trust user certificates, and apps that ignore the system proxy are not seen.
+- The capture proxy needs port 8890. If something else holds it, setup stops and says so.
+- The downloadable build (`electron-builder.yml`) is unsigned. macOS users run
   `xattr -cr /Applications/Sideglass.app` after copying it out of the disk image. Windows
   SmartScreen warns until the app is signed. Windows itself has not been run.
 
