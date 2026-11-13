@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme } from 'electron'
@@ -247,6 +247,8 @@ ipcMain.handle('calls:save', async (_, ids: unknown, format: unknown, layout: un
     return found ? [found] : []
   })
   if (exchanges.length === 0) throw new Error('Those requests are no longer in this session')
+  // Older live requests drop out of the session. Say how many, so a short file is not a surprise.
+  const missing = request.ids.length - exchanges.length
   if (request.layout === 'each') {
     const picked = await dialog.showOpenDialog({
       title: `Save ${exchanges.length} files, one request each`,
@@ -256,17 +258,17 @@ ipcMain.handle('calls:save', async (_, ids: unknown, format: unknown, layout: un
     if (picked.canceled || !picked.filePaths[0]) return null
     const dir = picked.filePaths[0]
     // A new folder, so a second save does not mix with files the user already has.
-    const folderName = unusedName(`sideglass-${exchanges.length}`, (name) => existsSync(join(dir, name)))
-    if (folderName !== folderName.split(/[/\\]/).pop()) throw new Error('Could not pick a folder name')
-    const folder = join(dir, folderName)
+    const folder = join(dir, unusedName(`sideglass-${exchanges.length}`, (name) => existsSync(join(dir, name))))
     mkdirSync(folder)
     const names = fileNames(exchanges, request.format)
-    exchanges.forEach((exchange, index) => {
-      const name = names[index]
-      if (!name || name !== name.split(/[/\\]/).pop()) throw new Error('Could not pick a file name')
-      writeFileSync(join(folder, name), renderCalls([exchange], request.format))
-    })
-    return { path: folder, count: exchanges.length }
+    try {
+      exchanges.forEach((exchange, index) => writeFileSync(join(folder, names[index]), renderCalls([exchange], request.format)))
+    } catch (error) {
+      // The folder is new, so removing it leaves nothing half written behind.
+      rmSync(folder, { recursive: true, force: true })
+      throw error
+    }
+    return { path: folder, count: exchanges.length, missing }
   }
   const target = await dialog.showSaveDialog({
     title: `Save ${exchanges.length} requests`,
@@ -275,7 +277,7 @@ ipcMain.handle('calls:save', async (_, ids: unknown, format: unknown, layout: un
   })
   if (target.canceled || !target.filePath) return null
   writeFileSync(target.filePath, renderCalls(exchanges, request.format))
-  return { path: target.filePath, count: exchanges.length }
+  return { path: target.filePath, count: exchanges.length, missing }
 })
 
 app.whenReady().then(() => {

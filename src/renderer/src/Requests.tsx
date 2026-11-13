@@ -175,7 +175,8 @@ export function Requests({
       if (!result) return
       const base = result.path.split(/[/\\]/).pop() || result.path
       setSavePath(result.path)
-      setSaveNote(layout === 'each' ? `Saved ${result.count} files to ${base}` : `Saved ${result.count} to ${base}`)
+      const saved = layout === 'each' ? `Saved ${result.count} files to ${base}` : `Saved ${result.count} to ${base}`
+      setSaveNote(result.missing > 0 ? `${saved} · ${result.missing} no longer in this session` : saved)
       setSaveOpen(false)
     } catch (error) {
       setSaveError((error as Error).message)

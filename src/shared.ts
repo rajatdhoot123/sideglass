@@ -17,6 +17,8 @@ export type { CloneOptions, CloneResult, LogLine, ExchangeSummary, Exchange, Tls
 export interface SaveResult {
   path: string
   count: number
+  /** Requests the window asked for that were no longer in the session. */
+  missing: number
 }
 export type Device = 'capture' | 'play'
 /** Which phone Sideglass captures: its own rooted emulator, or the user's phone over USB. */

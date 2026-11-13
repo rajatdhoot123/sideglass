@@ -1,4 +1,4 @@
-import type { CurlRequest } from './curl'
+import { joinHeader, REPLAY_SKIP, type CurlRequest } from './curl'
 import type { Exchange } from './proxy'
 
 export interface ReplayEdit {
@@ -6,8 +6,6 @@ export interface ReplayEdit {
   method?: string
   body?: string
 }
-
-const SKIP = new Set(['host', 'content-length', 'connection', 'transfer-encoding', 'x-sideglass-app'])
 
 /** Send a captured request from this computer and return it as a new exchange. */
 export async function sendReplay(request: CurlRequest, edit?: ReplayEdit): Promise<Exchange> {
@@ -22,8 +20,8 @@ export async function sendReplay(request: CurlRequest, edit?: ReplayEdit): Promi
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Replay only sends http and https')
   const headers = new Headers()
   for (const [name, value] of Object.entries(request.requestHeaders)) {
-    if (value === undefined || name.startsWith(':') || SKIP.has(name.toLowerCase())) continue
-    headers.set(name, Array.isArray(value) ? value.join(', ') : value)
+    if (value === undefined || name.startsWith(':') || REPLAY_SKIP.has(name.toLowerCase())) continue
+    headers.set(name, Array.isArray(value) ? joinHeader(name, value) : value)
   }
   const body = edit?.body !== undefined ? edit.body : request.requestBody
   const started = Date.now()

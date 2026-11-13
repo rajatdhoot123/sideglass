@@ -1,4 +1,4 @@
-import { toCurl } from './curl'
+import { joinHeader, REPLAY_SKIP, toCurl } from './curl'
 import { toHar } from './har'
 import type { Exchange } from './proxy'
 
@@ -13,8 +13,6 @@ export interface SaveRequest {
   format: SaveFormat
   layout: SaveLayout
 }
-
-const SKIP = new Set(['host', 'content-length', 'connection', 'transfer-encoding', 'x-sideglass-app'])
 
 export function isSaveFormat(value: unknown): value is SaveFormat {
   return value === 'har' || value === 'postman' || value === 'curl' || value === 'http'
@@ -72,14 +70,9 @@ export function callFileName(exchange: Exchange, index: number, total: number, f
   return `${(clean || n).slice(0, 80)}.${saveExtension(format)}`
 }
 
-/** One name per call. A name already in `taken`, or already used in this batch, gets `-2`, `-3`, … */
-export function fileNames(exchanges: Exchange[], format: SaveFormat, taken: (name: string) => boolean = () => false): string[] {
-  const used = new Set<string>()
-  return exchanges.map((exchange, index) => {
-    const name = unusedName(callFileName(exchange, index + 1, exchanges.length, format), (candidate) => taken(candidate) || used.has(candidate))
-    used.add(name)
-    return name
-  })
+/** One name per call. Each starts with its own index, so no two are the same. */
+export function fileNames(exchanges: Exchange[], format: SaveFormat): string[] {
+  return exchanges.map((exchange, index) => callFileName(exchange, index + 1, exchanges.length, format))
 }
 
 export function unusedName(name: string, taken: (name: string) => boolean): string {
@@ -94,12 +87,36 @@ export function unusedName(name: string, taken: (name: string) => boolean): stri
   throw new Error('Could not pick a file name')
 }
 
-/** A stand-in Sideglass shows instead of a body. Sending it again would not be the real call. */
-function replayBody(body?: string): string | undefined {
-  if (!body) return undefined
-  if (/^<\d+ bytes, too large to show>$/.test(body)) return undefined
-  if (/^<binary, \d+ bytes>$/.test(body)) return undefined
-  return body
+/**
+ * The body to send again. `text` goes in the file as is. `bytes` is protobuf or gRPC: the captured text
+ * is Sideglass's decoded view of it, so only the raw bytes are the real call. `left` says why a body
+ * that was captured is not in the file.
+ */
+interface ReplayBody {
+  text?: string
+  bytes?: Buffer
+  left?: string
+}
+
+function replayBody(exchange: Exchange): ReplayBody {
+  const body = exchange.requestBody
+  if (!body || exchange.method === 'GET' || exchange.method === 'HEAD') return {}
+  if (/^<\d+ bytes, too large to show>$/.test(body) || /^<binary, \d+ bytes>$/.test(body)) {
+    return { left: 'Body left out: Sideglass did not keep it as text.' }
+  }
+  const type = requestHeader(exchange, 'content-type').toLowerCase()
+  if (type.includes('grpc') || type.includes('protobuf')) {
+    const left = 'Body left out: it is binary protobuf, which this format cannot hold. Save as cURL to send it.'
+    return exchange.requestBytes ? { bytes: exchange.requestBytes, left } : { left: 'Body left out: it is binary protobuf and the raw bytes were not kept.' }
+  }
+  return { text: body }
+}
+
+function requestHeader(exchange: Exchange, name: string): string {
+  for (const [key, value] of Object.entries(exchange.requestHeaders ?? {})) {
+    if (key.toLowerCase() === name && value !== undefined) return Array.isArray(value) ? value.join(', ') : value
+  }
+  return ''
 }
 
 function note(exchange: Exchange): string {
@@ -123,12 +140,20 @@ function headerList(
   replay: boolean,
 ): { key: string; value: string }[] {
   const out: { key: string; value: string }[] = []
+  // A newline in a header would become a second header when the file is read back.
+  const clean = (text: string) => text.replace(/[\r\n]+/g, ' ')
   for (const [name, value] of Object.entries(headers ?? {})) {
     if (value === undefined || name.startsWith(':')) continue
-    if (replay && SKIP.has(name.toLowerCase())) continue
-    for (const item of Array.isArray(value) ? value : [value]) {
-      // A newline in a header would become a second header when the file is read back.
-      const text = item.replace(/[\r\n]+/g, ' ')
+    if (replay && REPLAY_SKIP.has(name.toLowerCase())) continue
+    const items = Array.isArray(value) ? value : [value]
+    // A request sends repeated headers as one line. Cookies split over HTTP/2 frames join with `; `.
+    if (replay) {
+      const text = clean(joinHeader(name, items.filter(Boolean)))
+      if (text) out.push({ key: name, value: text })
+      continue
+    }
+    for (const item of items) {
+      const text = clean(item)
       if (text) out.push({ key: name, value: text })
     }
   }
@@ -144,14 +169,14 @@ function bodyLanguage(contentType: string | undefined, body: string): 'json' | '
 
 function postmanRequest(exchange: Exchange): Record<string, unknown> {
   const header = headerList(exchange.requestHeaders, true)
-  const body = replayBody(exchange.requestBody)
+  const body = replayBody(exchange)
   const contentType = header.find((item) => item.key.toLowerCase() === 'content-type')?.value
   const request: Record<string, unknown> = { method: exchange.method, header, url: exchange.url }
-  const about = note(exchange)
+  const about = [note(exchange), body.left].filter(Boolean).join('\n\n')
   if (about) request.description = about
-  if (body !== undefined) {
-    const language = bodyLanguage(contentType, body)
-    request.body = { mode: 'raw', raw: body, ...(language ? { options: { raw: { language } } } : {}) }
+  if (body.text !== undefined) {
+    const language = bodyLanguage(contentType, body.text)
+    request.body = { mode: 'raw', raw: body.text, ...(language ? { options: { raw: { language } } } : {}) }
   }
   return request
 }
@@ -187,11 +212,16 @@ function toCurlScript(exchanges: Exchange[]): string {
     const about = note(exchange)
     lines.push(`# ${exchange.method} ${exchange.url}${about ? ` — ${about}` : ''}`)
     const requestHeaders: Record<string, string> = {}
-    for (const header of headerList(exchange.requestHeaders, true)) {
-      const previous = requestHeaders[header.key]
-      requestHeaders[header.key] = previous ? `${previous}, ${header.value}` : header.value
+    for (const header of headerList(exchange.requestHeaders, true)) requestHeaders[header.key] = header.value
+    const body = replayBody(exchange)
+    const command = toCurl({ method: exchange.method, url: exchange.url, requestHeaders, requestBody: body.text })
+    if (body.bytes) {
+      // Raw protobuf bytes cannot sit in a shell string, so the script decodes them and pipes them in.
+      lines.push(`printf '%s' '${body.bytes.toString('base64')}' | base64 --decode | ${command} --data-binary @-`)
+    } else {
+      if (body.left) lines.push(`# ${body.left}`)
+      lines.push(command)
     }
-    lines.push(toCurl({ method: exchange.method, url: exchange.url, requestHeaders, requestBody: replayBody(exchange.requestBody) }))
     lines.push('')
   }
   return `${lines.join('\n')}`
@@ -203,12 +233,15 @@ function toHttpFile(exchanges: Exchange[]): string {
     const lines = [`### ${itemName(exchange)}`]
     const about = note(exchange)
     if (about) lines.push(`# ${about}`)
+    const body = replayBody(exchange)
+    // This format has no escape: a `###` line starts the next request, and `{{name}}` is a variable.
+    const left = body.text !== undefined && /^###|\{\{/m.test(body.text) ? 'Body left out: it contains ### or {{, which this format reads as syntax. Save as cURL or Postman to keep it.' : body.left
+    if (left) lines.push(`# ${left}`)
     lines.push(`${exchange.method} ${exchange.url}`)
     for (const header of headerList(exchange.requestHeaders, true)) lines.push(`${header.key}: ${header.value}`)
-    const body = replayBody(exchange.requestBody)
-    if (body !== undefined) {
+    if (body.text !== undefined && !left) {
       lines.push('')
-      lines.push(body)
+      lines.push(body.text)
     }
     return lines.join('\n')
   })

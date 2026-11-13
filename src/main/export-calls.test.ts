@@ -89,9 +89,49 @@ test('file names stay in one folder and do not collide with a file already there
   assert.match(name, /ex\.com/)
   assert.match(name, /v1-a-b\.har$/)
 
-  const first = fileNames([exchange()], 'http')[0]
-  const again = fileNames([exchange()], 'http', (candidate) => candidate === first)[0]
-  assert.notEqual(again, first)
-  assert.match(again, /-2\.http$/)
+  const names = fileNames([exchange(), exchange()], 'http')
+  assert.notEqual(names[0], names[1])
   assert.equal(unusedName('note', () => false), 'note')
+  assert.equal(unusedName('sideglass-3', (name) => name === 'sideglass-3'), 'sideglass-3-2')
+})
+
+test('protobuf goes in the cURL script as raw bytes and stays out of text formats', () => {
+  const proto = exchange({
+    requestHeaders: { 'content-type': 'application/x-protobuf' },
+    requestBody: '1: "abc"\n2: 5',
+    requestBytes: Buffer.from([0x0a, 0x03, 0x61, 0x62, 0x63, 0x10, 0x05]),
+  })
+  const script = renderCalls([proto], 'curl')
+  assert.match(script, /printf '%s' 'CgNhYmMQBQ==' \| base64 --decode \| curl .* --data-binary @-$/m)
+  assert.doesNotMatch(script, /1: "abc"/)
+  assert.doesNotMatch(renderCalls([proto], 'http'), /1: "abc"/)
+  const collection = JSON.parse(renderCalls([proto], 'postman')) as { item: { request: { body?: unknown; description: string } }[] }
+  assert.equal(collection.item[0].request.body, undefined)
+  assert.match(collection.item[0].request.description, /protobuf/)
+  const lost = renderCalls([exchange({ requestHeaders: { 'content-type': 'application/grpc' }, requestBody: 'frame 1' })], 'curl')
+  assert.doesNotMatch(lost, /frame 1|--data-binary/)
+})
+
+test('replay headers drop Content-Encoding and join split cookies with a semicolon', () => {
+  const gz = exchange({ requestHeaders: { 'content-type': 'application/json', 'Content-Encoding': 'gzip', cookie: ['a=1', 'b=2'] } })
+  for (const format of ['curl', 'http'] as const) {
+    const text = renderCalls([gz], format)
+    assert.doesNotMatch(text, /content-encoding/i)
+    assert.match(text, /cookie: a=1; b=2/)
+  }
+  const collection = JSON.parse(renderCalls([gz], 'postman')) as { item: { request: { header: { key: string; value: string }[] } }[] }
+  assert.deepEqual(collection.item[0].request.header.filter((header) => header.key === 'cookie'), [{ key: 'cookie', value: 'a=1; b=2' }])
+})
+
+test('the .http file leaves out a body it would misread, and GET bodies are left out everywhere', () => {
+  const http = renderCalls([exchange({ requestBody: 'intro\n### not a request' }), exchange({ requestBody: '{"a":"{{x}}"}' })], 'http')
+  assert.equal((http.match(/^### /gm) ?? []).length, 2)
+  assert.equal((http.match(/# Body left out: it contains ###/g) ?? []).length, 2)
+  assert.doesNotMatch(http, /\{\{x\}\}/)
+
+  const get = exchange({ method: 'GET', requestBody: '{"n":1}' })
+  const collection = JSON.parse(renderCalls([get], 'postman')) as { item: { request: { body?: unknown } }[] }
+  assert.equal(collection.item[0].request.body, undefined)
+  assert.doesNotMatch(renderCalls([get], 'http'), /\{"n":1\}/)
+  assert.doesNotMatch(renderCalls([get], 'curl'), /--data-binary/)
 })
