@@ -14,7 +14,7 @@ import { Session } from './session'
 import { loadSettings, saveSettings } from './settings'
 import { findSdk, sdkAt } from './sdk'
 import { usbPhones } from './store/usb'
-import type { CloneOptions } from '../shared'
+import type { CloneOptions, CodeSearchOptions } from '../shared'
 
 let session: Session | null = null
 let window: BrowserWindow | null = null
@@ -76,6 +76,7 @@ ipcMain.handle('session:start', async () => {
   current.on('hooks-log', (l) => send('hooks-log', l))
   current.on('hooks-state', (s) => send('hooks-state', s))
   current.on('app-refusal', (r) => send('app-refusal', r))
+  current.on('code-progress', (p) => send('code-progress', p))
   exchangeBatch?.discard()
   const batch = new Batcher<ExchangeSummary>((items) => send('exchanges', items))
   exchangeBatch = batch
@@ -237,6 +238,13 @@ ipcMain.handle('har:open', async () => {
   return requireSession().openHarText(readFileSync(picked.filePaths[0], 'utf8'))
 })
 ipcMain.handle('storage:list', (_, pkg: string) => requireSession().storage(pkg))
+ipcMain.handle('code:decompile', (_, pkg: string, force?: boolean) => requireSession().decompile(pkg, force))
+ipcMain.handle('code:cancel', (_, pkg: string) => requireSession().cancelDecompile(pkg))
+ipcMain.handle('code:index', (_, pkg: string) => requireSession().codeIndex(pkg))
+ipcMain.handle('code:file', (_, pkg: string, file: string) => requireSession().codeFile(pkg, String(file)))
+ipcMain.handle('code:search', (_, pkg: string, query: string, options?: CodeSearchOptions) =>
+  requireSession().searchCode(pkg, String(query), { skipLibraries: Boolean(options?.skipLibraries), matchCase: Boolean(options?.matchCase) }),
+)
 ipcMain.handle('sms:send', (_, device: Device, from: string, text: string) => requireSession().sendSms(device, from, text))
 ipcMain.handle('har:export', async () => {
   const s = requireSession()

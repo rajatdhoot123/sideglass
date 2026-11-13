@@ -13,8 +13,8 @@ const APKTOOL_VERSION = '3.0.3'
 const APKTOOL_URL = `https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar`
 const APKTOOL_SHA256 = 'dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423'
 
-/** Java for apktool: JAVA_HOME, Android Studio's bundled runtime, then whatever is on PATH. */
-function findJava(): string {
+/** Java for apktool and jadx: JAVA_HOME, Android Studio's bundled runtime, then whatever is on PATH. */
+export function findJava(): string {
   const bin = platform() === 'win32' ? 'java.exe' : 'java'
   const homes = [
     process.env.JAVA_HOME,
