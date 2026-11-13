@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld('api', {
   storage: invoke('storage:list'),
   sendSms: invoke('sms:send'),
   exportHar: invoke('har:export'),
+  saveCalls: invoke('calls:save'),
   on: (channel: string, cb: (...args: unknown[]) => void) => {
     const listener = (_: unknown, ...args: unknown[]) => cb(...args)
     ipcRenderer.on(channel, listener)

@@ -147,7 +147,7 @@ export function App() {
           >
             Clear
           </button>
-          <button onClick={() => void window.api.exportHar()}>Export HAR</button>
+          <button title="Every request as HAR, including ones the filter hides. To save a filtered set, use Save on Requests." onClick={() => void window.api.exportHar()}>Export HAR</button>
           <button
             onClick={() =>
               void window.api.openHar().then((rows) => {

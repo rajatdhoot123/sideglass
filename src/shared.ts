@@ -10,8 +10,14 @@ import type { HooksSnapshot } from './main/hooks'
 import type { StoreApp } from './main/store/fdroid'
 import type { UsbPhone } from './main/store/usb'
 import type { CloneOptions, CloneResult } from './main/clone'
+import type { SaveFormat, SaveLayout } from './main/export-calls'
 
-export type { CloneOptions, CloneResult, LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput, ProxyRule, ReplayEdit, StorageEntry, Refusal, RefusalKind, HooksSnapshot }
+export type { CloneOptions, CloneResult, LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput, ProxyRule, ReplayEdit, StorageEntry, Refusal, RefusalKind, HooksSnapshot, SaveFormat, SaveLayout }
+/** Where a save wrote, and how many requests made it into the file or folder. */
+export interface SaveResult {
+  path: string
+  count: number
+}
 export type Device = 'capture' | 'play'
 /** Which phone Sideglass captures: its own rooted emulator, or the user's phone over USB. */
 export type PhoneMode = 'virtual' | 'usb'
@@ -111,6 +117,11 @@ export interface Api {
   storage(pkg: string): Promise<StorageEntry[]>
   sendSms(device: Device, from: string, text: string): Promise<void>
   exportHar(): Promise<string | null>
+  /**
+   * Write the given requests to a file the user picks.
+   * `each` asks for a folder and writes one file per request. Cancelled dialogs return null.
+   */
+  saveCalls(ids: string[], format: SaveFormat, layout: SaveLayout): Promise<SaveResult | null>
   on(channel: 'progress', cb: (p: Progress) => void): () => void
   on(channel: 'setup-log', cb: (line: string) => void): () => void
   on(channel: 'exchange', cb: (e: ExchangeSummary) => void): () => void
