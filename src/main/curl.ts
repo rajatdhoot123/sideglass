@@ -6,13 +6,22 @@ export interface CurlRequest {
   requestBody?: string
 }
 
-const SKIP = new Set(['host', 'content-length', 'connection', 'transfer-encoding', 'x-sideglass-app'])
+/**
+ * Headers a replay must not copy. The transport sets the first ones again, and the captured body is
+ * already decompressed, so a copied Content-Encoding would tell the server to decompress plain text.
+ */
+export const REPLAY_SKIP = new Set(['host', 'content-length', 'connection', 'transfer-encoding', 'content-encoding', 'x-sideglass-app'])
+
+/** Repeated headers as one value. Cookies split over HTTP/2 frames join with `; `, everything else with `, `. */
+export function joinHeader(name: string, values: string[]): string {
+  return values.join(name.toLowerCase() === 'cookie' ? '; ' : ', ')
+}
 
 export function toCurl(request: CurlRequest): string {
   const parts = ['curl', '-X', quote(request.method), quote(request.url)]
   for (const [name, value] of Object.entries(request.requestHeaders)) {
-    if (value === undefined || name.startsWith(':') || SKIP.has(name.toLowerCase())) continue
-    const text = Array.isArray(value) ? value.join(', ') : value
+    if (value === undefined || name.startsWith(':') || REPLAY_SKIP.has(name.toLowerCase())) continue
+    const text = Array.isArray(value) ? joinHeader(name, value) : value
     parts.push('-H', quote(`${name}: ${text}`))
   }
   if (request.requestBody && request.method !== 'GET' && request.method !== 'HEAD') {

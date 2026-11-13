@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { Exchange, ExchangeSummary, ProxyRule, SavedSession } from '../../shared'
+import type { Exchange, ExchangeSummary, ProxyRule, SavedSession, SaveFormat, SaveLayout } from '../../shared'
 import { toCurl } from '../../main/curl'
 import { FILTER_KEYS, parseFilter, RESOURCE_TYPES, resourceType, TYPE_LABELS, type ResourceType } from './netfilter'
 
@@ -41,6 +41,34 @@ const ROW_HEIGHT = 22
 const OVERSCAN = 12
 
 const shortApp = (pkg?: string) => (pkg ? (pkg.split('.').pop() ?? pkg) : '')
+
+const SAVE_FORMATS: { id: SaveFormat; name: string; one: string; each: string }[] = [
+  { id: 'har', name: 'HAR', one: 'One file. Opens in Chrome, Charles, and Postman.', each: 'One .har file per request.' },
+  { id: 'postman', name: 'Postman', one: 'One collection you can import.', each: 'One collection file per request.' },
+  { id: 'curl', name: 'cURL', one: 'One shell script you can run.', each: 'One script per request.' },
+  { id: 'http', name: 'HTTP', one: 'One file for VS Code and IntelliJ.', each: 'One .http file per request.' },
+]
+
+function scopeText(options: {
+  saveAll: boolean
+  total: number
+  matched: number
+  types: Set<ResourceType>
+  app: string
+  filter: string
+  invert: boolean
+  hideGoogle: boolean
+}): string {
+  if (options.saveAll) return `All ${options.total} captured requests.`
+  const parts: string[] = []
+  if (options.types.size > 0) parts.push([...options.types].map((type) => TYPE_LABELS[type]).join(' + '))
+  if (options.app !== '__all__') parts.push(shortApp(options.app))
+  const text = options.filter.trim()
+  if (text) parts.push(options.invert ? `not "${text}"` : `"${text}"`)
+  if (options.hideGoogle) parts.push('Google hidden')
+  if (parts.length === 0) return `${options.matched} requests. The list is not filtered.`
+  return `${options.matched} requests · ${parts.join(' · ')}.`
+}
 
 function patternOf(url: string): string {
   try {
@@ -89,6 +117,14 @@ export function Requests({
   const [mockBody, setMockBody] = useState('{}')
   const [decoded, setDecoded] = useState('')
   const [schemaType, setSchemaType] = useState('')
+  const [saveOpen, setSaveOpen] = useState(false)
+  const [saveAll, setSaveAll] = useState(false)
+  const [layout, setLayout] = useState<SaveLayout>('one')
+  const [format, setFormat] = useState<SaveFormat>('har')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [saveNote, setSaveNote] = useState('')
+  const [savePath, setSavePath] = useState('')
   const apps = useMemo(() => [...new Set(list.map((e) => e.app).filter((name): name is string => !!name))].sort(), [list])
 
   useEffect(() => {
@@ -141,6 +177,36 @@ export function Requests({
       else next.add(type)
       return next
     })
+  }
+
+  useEffect(() => {
+    if (!saveOpen) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !saving) setSaveOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [saveOpen, saving])
+
+  const saveCount = saveAll ? list.length : rows.length
+  const save = async () => {
+    const ids = (saveAll ? list : rows).map((row) => row.id)
+    if (ids.length === 0) return
+    setSaving(true)
+    setSaveError('')
+    try {
+      const result = await window.api.saveCalls(ids, format, layout)
+      if (!result) return
+      const base = result.path.split(/[/\\]/).pop() || result.path
+      setSavePath(result.path)
+      const saved = layout === 'each' ? `Saved ${result.count} files to ${base}` : `Saved ${result.count} to ${base}`
+      setSaveNote(result.missing > 0 ? `${saved} · ${result.missing} no longer in this session` : saved)
+      setSaveOpen(false)
+    } catch (error) {
+      setSaveError((error as Error).message)
+    } finally {
+      setSaving(false)
+    }
   }
 
   const current = selected ? list.find((e) => e.id === selected) : undefined
@@ -212,20 +278,98 @@ export function Requests({
           ))}
         </select>
       </div>
-      <div className="typechips" role="toolbar" aria-label="Resource type">
-        <button className={types.size === 0 ? 'on' : ''} onClick={() => pickType(null, false)}>
-          All
-        </button>
-        {RESOURCE_TYPES.map((t) => (
-          <button key={t} className={types.has(t) ? 'on' : ''} onClick={(e) => pickType(t, e.metaKey || e.ctrlKey)}>
-            {TYPE_LABELS[t]}
+      <div className="typebar">
+        <div className="typechips" role="toolbar" aria-label="Resource type">
+          <button className={types.size === 0 ? 'on' : ''} onClick={() => pickType(null, false)}>
+            All
           </button>
-        ))}
-        <span className="spacer" />
-        <span className="muted small">
+          {RESOURCE_TYPES.map((t) => (
+            <button key={t} className={types.has(t) ? 'on' : ''} onClick={(e) => pickType(t, e.metaKey || e.ctrlKey)}>
+              {TYPE_LABELS[t]}
+            </button>
+          ))}
+        </div>
+        <span className="muted small match-count">
           {rows.length} matched · {list.length} total
         </span>
+        {saveNote && (
+          <span className="muted small save-note" title={savePath}>
+            {saveNote}
+          </span>
+        )}
+        <button
+          type="button"
+          className={`save ${saveOpen ? 'on' : ''}`}
+          aria-expanded={saveOpen}
+          aria-controls="save-requests"
+          disabled={list.length === 0}
+          title="Save the requests that match the filter, type, and app"
+          onClick={() => {
+            setSaveOpen((open) => {
+              if (!open) setSaveAll(false)
+              return !open
+            })
+            setSaveError('')
+          }}
+        >
+          Save {rows.length}…
+        </button>
       </div>
+      {saveOpen && (
+        <div id="save-requests" className="save-panel">
+          <p className="save-lead">
+            {scopeText({ saveAll, total: list.length, matched: rows.length, types, app, filter, invert, hideGoogle })}
+          </p>
+          {rows.length !== list.length && (
+            <label className="save-all">
+              <input type="checkbox" checked={saveAll} onChange={(e) => setSaveAll(e.target.checked)} />
+              Save all {list.length} instead
+            </label>
+          )}
+          {!saveAll && types.size === 0 && list.length > 0 && (
+            <p className="muted small save-hint">To save one kind only, click a type above, such as Fetch/XHR.</p>
+          )}
+          <div className="save-row">
+            <span className="muted small" id="save-layout-label">
+              Save as
+            </span>
+            <div className="save-layout" role="group" aria-labelledby="save-layout-label">
+              <button type="button" className={layout === 'one' ? 'on' : ''} aria-pressed={layout === 'one'} onClick={() => setLayout('one')}>
+                One file
+              </button>
+              <button type="button" className={layout === 'each' ? 'on' : ''} aria-pressed={layout === 'each'} onClick={() => setLayout('each')}>
+                One file per request
+              </button>
+            </div>
+          </div>
+          <div className="muted small">Format</div>
+          <div className="save-formats" role="radiogroup" aria-label="Format">
+            {SAVE_FORMATS.map((item) => (
+              <label key={item.id} className={format === item.id ? 'on' : ''}>
+                <input type="radio" name="save-format" value={item.id} checked={format === item.id} onChange={() => setFormat(item.id)} />
+                <span>
+                  <b>{item.name}</b>
+                  <small>{layout === 'one' ? item.one : item.each}</small>
+                </span>
+              </label>
+            ))}
+          </div>
+          <p className="muted small save-hint">
+            {layout === 'one'
+              ? 'You pick the file name next.'
+              : 'You pick a folder next. Sideglass adds a new folder inside it, with one file per request.'}
+          </p>
+          {saveError && <p className="save-error">{saveError}</p>}
+          <div className="save-actions">
+            <button type="button" className="primary" disabled={saving || saveCount === 0} onClick={() => void save()}>
+              {saving ? 'Saving…' : `Save ${saveCount}`}
+            </button>
+            <button type="button" onClick={() => setSaveOpen(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
       <div className="table">
         <div className="row head">
           <span>Time</span>

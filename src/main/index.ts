@@ -1,10 +1,11 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme } from 'electron'
 import type { ExchangeSummary, KeyEvent, Settings } from '../shared'
 import type { ReplayEdit } from './replay'
 import type { ProxyRule } from './rules'
+import { fileNames, parseSaveRequest, renderCalls, saveExtension, saveFilterName, unusedName } from './export-calls'
 import { toHar } from './har'
 import { publicExchange } from './proxy'
 import { appendLog, installQuietLog } from './quiet'
@@ -243,6 +244,47 @@ ipcMain.handle('har:export', async () => {
   if (target.canceled || !target.filePath) return null
   writeFileSync(target.filePath, JSON.stringify(toHar([...s.proxy.exchanges.values()], s.timeline.inputs), null, 2))
   return target.filePath
+})
+ipcMain.handle('calls:save', async (_, ids: unknown, format: unknown, layout: unknown) => {
+  const request = parseSaveRequest(ids, format, layout)
+  const current = requireSession()
+  // Bodies stay in the main process. The window only says which rows it is showing.
+  const exchanges = request.ids.flatMap((id) => {
+    const found = current.getExchange(id)
+    return found ? [found] : []
+  })
+  if (exchanges.length === 0) throw new Error('Those requests are no longer in this session')
+  // Older live requests drop out of the session. Say how many, so a short file is not a surprise.
+  const missing = request.ids.length - exchanges.length
+  if (request.layout === 'each') {
+    const picked = await dialog.showOpenDialog({
+      title: `Save ${exchanges.length} files, one request each`,
+      buttonLabel: 'Save here',
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    if (picked.canceled || !picked.filePaths[0]) return null
+    const dir = picked.filePaths[0]
+    // A new folder, so a second save does not mix with files the user already has.
+    const folder = join(dir, unusedName(`sideglass-${exchanges.length}`, (name) => existsSync(join(dir, name))))
+    mkdirSync(folder)
+    const names = fileNames(exchanges, request.format)
+    try {
+      exchanges.forEach((exchange, index) => writeFileSync(join(folder, names[index]), renderCalls([exchange], request.format)))
+    } catch (error) {
+      // The folder is new, so removing it leaves nothing half written behind.
+      rmSync(folder, { recursive: true, force: true })
+      throw error
+    }
+    return { path: folder, count: exchanges.length, missing }
+  }
+  const target = await dialog.showSaveDialog({
+    title: `Save ${exchanges.length} requests`,
+    defaultPath: `sideglass-${exchanges.length}.${saveExtension(request.format)}`,
+    filters: [{ name: saveFilterName(request.format), extensions: [saveExtension(request.format)] }],
+  })
+  if (target.canceled || !target.filePath) return null
+  writeFileSync(target.filePath, renderCalls(exchanges, request.format))
+  return { path: target.filePath, count: exchanges.length, missing }
 })
 
 app.whenReady().then(() => {
