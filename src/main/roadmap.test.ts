@@ -74,8 +74,15 @@ test('HAR export round-trips the request and the app tag', () => {
 test('toCurl quotes a body that contains a single quote', () => {
   const command = toCurl({ ...exchange(), requestBody: "a'b" })
   assert.match(command, /curl -X 'POST' 'https:\/\/example.com\/v1\/listen\?x=1'/)
-  assert.match(command, /--data-binary 'a'\\''b'/)
+  assert.match(command, /--data-raw 'a'\\''b'/)
+  assert.doesNotMatch(command, /--data-binary/)
   assert.doesNotMatch(command, /X-Sideglass-App|content-length/i)
+})
+
+test('toCurl does not let a leading @ read a local file', () => {
+  const command = toCurl({ ...exchange(), requestBody: '@/tmp/secret' })
+  assert.match(command, /--data-raw '@\/tmp\/secret'/)
+  assert.doesNotMatch(command, /--data-binary/)
 })
 
 test('takeAppHeader records a package and removes the header', () => {
