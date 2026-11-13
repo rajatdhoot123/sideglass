@@ -1,7 +1,8 @@
 // Talks to frida-server for the Electron app. Electron's Node ABI does not match
 // the frida prebuild, so this process runs under system Node.
 import { createRequire } from 'node:module'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import readline from 'node:readline'
@@ -13,7 +14,10 @@ const sessions = new Map()
 let device = null
 let compiled = null
 let compiledFrom = ''
+let compiling = null
 let gating = null
+let gatePending = null
+let entrySeq = 0
 
 function projectRoot() {
   try {
@@ -34,27 +38,117 @@ async function remote(port) {
 /** Frida 17 does not define `Java` until the bridge is bundled into the agent. */
 async function agentBundle(source) {
   if (compiled && compiledFrom === source) return compiled
-  // The compiler rejects an entry file outside its project root, and that root has to be
-  // the app checkout so `frida-java-bridge` resolves. node_modules is not watched or committed.
+  // Gate and spawn can ask at the same time. One compile serves both.
+  if (compiling && compiling.source === source) return compiling.promise
+  const promise = compileAgent(source).finally(() => {
+    if (compiling && compiling.promise === promise) compiling = null
+  })
+  compiling = { source, promise }
+  return promise
+}
+
+async function compileAgent(source) {
+  const text = `import Java from 'frida-java-bridge'\n${source}`
   const root = projectRoot()
-  const file = join(root, 'node_modules', '.sideglass-hooks-agent.mjs')
-  mkdirSync(dirname(file), { recursive: true })
-  writeFileSync(file, `import Java from 'frida-java-bridge'\n${source}`)
-  const compiler = new frida.Compiler()
-  const diagnostics = []
-  compiler.diagnostics.connect((diag) => diagnostics.push(diag))
+  const name = `.sideglass-hooks-agent-${process.pid}-${++entrySeq}.mjs`
   let bundle
   try {
-    bundle = await compiler.build(file, { projectRoot: root })
-  } finally {
-    rmSync(file, { force: true })
-  }
-  if (!bundle || !bundle.includes('sideglass hooks loaded')) {
-    throw new Error(`Hooks agent did not compile. ${JSON.stringify(diagnostics).slice(0, 500)}`)
+    // The compiler rejects an entry file outside its project root, and that root has to
+    // contain node_modules so `frida-java-bridge` resolves. A checkout can write there.
+    const file = join(root, 'node_modules', name)
+    writeFileSync(file, text)
+    try {
+      bundle = await build(file, root)
+    } finally {
+      rmSync(file, { force: true })
+    }
+  } catch (error) {
+    if (!isWriteError(error)) throw error
+    // An installed app's folder is often read-only. Build from a temp root that links to it.
+    const temp = mkdtempSync(join(tmpdir(), 'sideglass-hooks-'))
+    try {
+      symlinkSync(join(root, 'node_modules'), join(temp, 'node_modules'), 'junction')
+      const file = join(temp, name)
+      writeFileSync(file, text)
+      bundle = await build(file, temp)
+    } finally {
+      rmSync(temp, { recursive: true, force: true })
+    }
   }
   compiled = bundle
   compiledFrom = source
   return bundle
+}
+
+function isWriteError(error) {
+  return Boolean(error && ['EACCES', 'EPERM', 'EROFS', 'ENOENT'].includes(error.code))
+}
+
+async function build(file, root) {
+  const compiler = new frida.Compiler()
+  const diagnostics = []
+  compiler.diagnostics.connect((diag) => diagnostics.push(diag))
+  const bundle = await compiler.build(file, { projectRoot: root })
+  if (!bundle || !bundle.includes('sideglass hooks loaded')) {
+    throw new Error(`Hooks agent did not compile. ${JSON.stringify(diagnostics).slice(0, 500)}`)
+  }
+  return bundle
+}
+
+/**
+ * Loaded into every zygote fork before the hooks agent. It waits for the fork to
+ * become its final process, then reports the uid and name, so the large agent is
+ * only loaded into user apps. Plain JS: it needs no compile.
+ */
+const PROBE_SOURCE = `
+function exportOf(name) {
+  if (typeof Module.getGlobalExportByName === 'function') return Module.getGlobalExportByName(name)
+  return Module.getExportByName(null, name)
+}
+var getuid = new NativeFunction(exportOf('getuid'), 'uint', [])
+var openFn = new NativeFunction(exportOf('open'), 'int', ['pointer', 'int'])
+var readFn = new NativeFunction(exportOf('read'), 'int', ['int', 'pointer', 'int'])
+var closeFn = new NativeFunction(exportOf('close'), 'int', ['int'])
+var path = Memory.allocUtf8String('/proc/self/cmdline')
+var buf = Memory.alloc(256)
+function processName() {
+  var fd = openFn(path, 0)
+  if (fd < 0) return ''
+  var n = readFn(fd, buf, 255)
+  closeFn(fd)
+  if (n <= 0) return ''
+  buf.add(n).writeU8(0)
+  return buf.readUtf8String() || ''
+}
+var ZYGOTE = /^(zygote64|zygote|usap64|usap|<pre-initialized>)$/
+rpc.exports = {
+  probe: function (timeoutMs) {
+    var started = Date.now()
+    return new Promise(function (resolve) {
+      function check() {
+        var uid = getuid()
+        var name = processName()
+        // Zygote runs as root. A fork is specialized once its uid and name have both changed.
+        var settled = uid !== 0 && name && !ZYGOTE.test(name)
+        if (settled || Date.now() - started > timeoutMs) resolve({ uid: uid, name: settled ? name : '' })
+        else setTimeout(check, 20)
+      }
+      check()
+    })
+  },
+}
+`
+
+/** App uids are 10000-19999 within a user. Isolated (99000+) and system processes are skipped. */
+function isAppUid(uid) {
+  const appId = Number(uid) % 100000
+  return appId >= 10000 && appId <= 19999
+}
+
+const SKIP_NAME = /^(android|system_server|com\.android\.|com\.google\.android\.(gms|gsf|webview|ext\.))/
+
+function wantsHooks(uid, name) {
+  return isAppUid(uid) && Boolean(name) && !SKIP_NAME.test(name)
 }
 
 function watchScript(script, label) {
@@ -65,10 +159,19 @@ function watchScript(script, label) {
   })
 }
 
-async function callPrepare(script) {
-  const prepare = script.exports && script.exports.prepare
-  if (typeof prepare !== 'function') throw new Error('Hooks script has no prepare export')
-  await prepare()
+async function callExport(script, name, ...args) {
+  const fn = script.exports && script.exports[name]
+  if (typeof fn !== 'function') throw new Error(`Hooks script has no ${name} export`)
+  return fn(...args)
+}
+
+/** Forget a hooked process once it exits. */
+function track(key, session, script) {
+  const item = { session, script }
+  sessions.set(key, item)
+  session.detached.connect(() => {
+    if (sessions.get(key) === item) sessions.delete(key)
+  })
 }
 
 async function spawnApp(message) {
@@ -83,11 +186,13 @@ async function spawnApp(message) {
     const script = await session.createScript(source)
     watchScript(script, message.pkg)
     await script.load()
-    // Spawn pauses before the app runs, so the bindApplication hook has to be in place first.
-    await callPrepare(script)
+    // Spawn pauses before the app runs, so the Java hooks are queued first.
+    await callExport(script, 'prepare', { pkg: message.pkg, running: false })
     await dev.resume(pid)
+    // Native hooks wait for the process to run: patching them while paused crashed Flutter.
+    await callExport(script, 'started').catch(() => undefined)
     const prior = sessions.get(message.pkg)
-    sessions.set(message.pkg, { session, script })
+    track(message.pkg, session, script)
     if (prior) {
       await prior.script.unload().catch(() => undefined)
       await prior.session.detach().catch(() => undefined)
@@ -100,8 +205,8 @@ async function spawnApp(message) {
 }
 
 /**
- * Pause every process zygote forks, load the agent, then let it run.
- * An icon tap forks zygote the same way a launch from the list does.
+ * Every process zygote forks arrives here paused. A small probe finds out what it
+ * becomes. Only user apps get the hooks agent; the rest are detached at once.
  * Resume is unconditional: a child left paused freezes that app.
  */
 async function instrument(dev, source, pid) {
@@ -112,25 +217,42 @@ async function instrument(dev, source, pid) {
     await dev.resume(pid).catch(() => undefined)
   }
   const timer = setTimeout(() => void resume(), 8_000)
+  let session = null
+  let keep = false
   try {
-    const session = await dev.attach(pid)
-    const script = await session.createScript(source)
-    watchScript(script, String(pid))
-    await script.load()
-    sessions.set(pid, { session, script })
-    // The child is still a paused zygote fork. Java.perform here deadlocks, so resume first.
+    session = await dev.attach(pid)
+    const probe = await session.createScript(PROBE_SOURCE)
+    await probe.load()
+    // The fork is still zygote until it runs. Java.perform here deadlocks, so resume first.
     await resume()
-    await callPrepare(script)
+    const { uid, name } = await callExport(probe, 'probe', 5_000)
+    await probe.unload().catch(() => undefined)
+    if (!wantsHooks(uid, name)) return
+    const script = await session.createScript(source)
+    watchScript(script, name)
+    await script.load()
+    keep = true
+    track(pid, session, script)
+    await callExport(script, 'prepare', { pkg: name, running: true })
   } catch (error) {
     process.stderr.write(`hook ${pid}: ${error instanceof Error ? error.message : error}\n`)
   } finally {
     clearTimeout(timer)
     await resume()
+    if (session && !keep) await session.detach().catch(() => undefined)
   }
 }
 
-async function gate(message) {
-  if (gating) return {}
+function gate(message) {
+  if (gating) return Promise.resolve({})
+  // A second request while the first is attaching shares it, so zygote is watched once.
+  gatePending ??= startGate(message).finally(() => {
+    gatePending = null
+  })
+  return gatePending
+}
+
+async function startGate(message) {
   const source = await agentBundle(message.source)
   const dev = await remote(message.port)
   const signal = dev.childAdded
@@ -140,18 +262,8 @@ async function gate(message) {
     if (!pid) return
     void instrument(dev, source, pid)
   }
-  const onChildGone = (child) => {
-    const pid = child && child.pid
-    if (!pid) return
-    const item = sessions.get(pid)
-    if (!item) return
-    sessions.delete(pid)
-    void item.script.unload().catch(() => undefined)
-    void item.session.detach().catch(() => undefined)
-  }
   // connect() returns nothing. disconnect() takes the same function.
   signal.connect(onChild)
-  if (dev.childRemoved && typeof dev.childRemoved.connect === 'function') dev.childRemoved.connect(onChildGone)
   const attached = []
   try {
     for (const name of ['zygote64', 'zygote']) {
@@ -168,19 +280,18 @@ async function gate(message) {
     if (!attached.length) throw new Error('Could not attach to zygote')
   } catch (error) {
     signal.disconnect(onChild)
-    if (dev.childRemoved && typeof dev.childRemoved.disconnect === 'function') dev.childRemoved.disconnect(onChildGone)
     throw error
   }
-  gating = { signal, onChild, onChildGone, removed: dev.childRemoved, sessions: attached }
+  gating = { signal, onChild, sessions: attached }
   return {}
 }
 
 async function ungate() {
+  await gatePending?.catch(() => undefined)
   const current = gating
   gating = null
   if (!current) return {}
   current.signal.disconnect(current.onChild)
-  if (current.removed && typeof current.removed.disconnect === 'function') current.removed.disconnect(current.onChildGone)
   await Promise.all(current.sessions.map((session) => session.disableChildGating?.().catch(() => undefined)))
   await Promise.all(current.sessions.map((session) => session.detach().catch(() => undefined)))
   return {}

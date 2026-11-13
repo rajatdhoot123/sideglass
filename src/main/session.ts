@@ -418,15 +418,28 @@ export class Session extends EventEmitter {
     if (this.hooksEnabled && this.mode === 'virtual') {
       try {
         const hooks = this.getHooks()
-        if (!hooks.gating) await hooks.arm()
+        // The same path as the Hooks switch: one arm at a time, and the app pool is cleared first.
+        if (!hooks.gating && (await this.armIconHooks(adb))) await this.attachScreen(adb)
         if (hooks.gating) {
           // Zygote loads the agent into the new process. Spawning again would inject it twice.
           await adb.shell(`am force-stop ${pkg}`)
+          const since = Date.now()
           await adb.shell(`am start -n '${component}'`)
-          await new Promise((r) => setTimeout(r, 800))
-          const pid = await this.pidOf(pkg)
+          const deadline = since + 10_000
+          let hookedPid: number | null = null
+          while (Date.now() < deadline) {
+            hookedPid = hooks.hookedSince(pkg, since)
+            if (hookedPid) break
+            await new Promise((r) => setTimeout(r, 250))
+          }
+          const pid = hookedPid ?? (await this.pidOf(pkg))
           if (pid) this.watch(pkg, pid)
-          return { device: 'capture', pid, hooked: true, message }
+          if (!hookedPid) {
+            const note = `${pkg} started, but its hooks did not load.`
+            this.emit('hooks-log', note)
+            message = message ? `${message} ${note}` : note
+          }
+          return { device: 'capture', pid, hooked: Boolean(hookedPid), message }
         }
         const pid = await hooks.launch(pkg)
         this.watch(pkg, pid)

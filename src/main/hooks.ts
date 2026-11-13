@@ -103,6 +103,9 @@ export class Hooks {
 
   /** System Node. Electron cannot load the frida prebuild (different ABI). */
   private host: HookHost | null = null
+  private arming: Promise<void> | null = null
+  /** Last process each package was hooked in, from the agent's own report. */
+  private readonly hooked = new Map<string, { pid: number; at: number }>()
   private starting = false
   private serverReady = false
 
@@ -129,8 +132,29 @@ export class Hooks {
    * Attach to zygote so the next app process, however it is opened, loads the agent.
    * Safe to call more than once.
    */
-  async arm(): Promise<void> {
-    if (!this.enabled || this.gating) return
+  arm(): Promise<void> {
+    if (!this.enabled || this.gating) return Promise.resolve()
+    // Overlapping calls would restart frida-server under each other.
+    this.arming ??= this.doArm().finally(() => {
+      this.arming = null
+    })
+    return this.arming
+  }
+
+  /** The pid `pkg` was hooked in at or after `since` (ms), or null. */
+  hookedSince(pkg: string, since: number): number | null {
+    const hit = this.hooked.get(pkg)
+    return hit && hit.at >= since ? hit.pid : null
+  }
+
+  private newHost(): HookHost {
+    return new HookHost(
+      (line) => this.say(line),
+      (pkg, pid) => this.hooked.set(pkg, { pid, at: Date.now() }),
+    )
+  }
+
+  private async doArm(): Promise<void> {
     await this.ensureServer()
     // Turned off while frida-server was still starting.
     if (!this.enabled || this.gating) return
@@ -164,7 +188,7 @@ export class Hooks {
     await this.ensureServer()
     const adb = this.getAdb()
     await adb.shell(`am force-stop ${pkg}`)
-    const host = this.host ?? (this.host = new HookHost((line) => this.say(line)))
+    const host = this.host ?? (this.host = this.newHost())
     try {
       const pid = await withTimeout(host.spawn(pkg, AGENT_SOURCE), INJECT_TIMEOUT_MS, 'Hook injection')
       return pid
@@ -212,7 +236,7 @@ export class Hooks {
         .catch(() => undefined)
       await adb.exec(['forward', `tcp:${SERVER_PORT}`, `tcp:${SERVER_PORT}`])
       await this.waitPort()
-      this.host ??= new HookHost((line) => this.say(line))
+      this.host ??= this.newHost()
       await this.host.ping()
       this.serverReady = true
       this.ready = true
@@ -292,7 +316,10 @@ class HookHost {
   private buffer = ''
   private stderrTail = ''
 
-  constructor(private readonly log: (line: string) => void) {}
+  constructor(
+    private readonly log: (line: string) => void,
+    private readonly onHooked: (pkg: string, pid: number) => void,
+  ) {}
 
   ping(): Promise<void> {
     return this.request({ cmd: 'ping' }, 30_000).then(() => undefined)
@@ -393,10 +420,16 @@ class HookHost {
       if (!text) continue
       this.stderrTail = `${this.stderrTail}\n${text}`.slice(-2000)
       try {
-        const parsed = JSON.parse(text) as { sg?: string; pkg?: string; message?: { type?: string; payload?: { sg?: string; text?: string }; description?: string } }
+        const parsed = JSON.parse(text) as {
+          sg?: string
+          pkg?: string
+          message?: { type?: string; payload?: { sg?: string; text?: string; pkg?: string; pid?: number }; description?: string }
+        }
         if (parsed.sg === 'script') {
           const msg = parsed.message
-          if (msg?.type === 'send' && msg.payload?.sg === 'log') this.log(`${parsed.pkg}: ${msg.payload.text}`)
+          if (msg?.type === 'send' && msg.payload?.sg === 'hooked' && msg.payload.pkg && msg.payload.pid) {
+            this.onHooked(msg.payload.pkg, msg.payload.pid)
+          } else if (msg?.type === 'send' && msg.payload?.sg === 'log') this.log(`${parsed.pkg}: ${msg.payload.text}`)
           else if (msg?.type === 'error') this.log(`${parsed.pkg}: hook error: ${msg.description ?? 'unknown'}`)
           continue
         }

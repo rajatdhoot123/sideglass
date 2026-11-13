@@ -21,6 +21,8 @@ test('ps rows yield pids and names', () => {
 test('the hooks agent does not touch Java until the host calls prepare', () => {
   assert.match(AGENT_SOURCE, /rpc\.exports/)
   assert.match(AGENT_SOURCE, /prepare: function/)
-  assert.match(AGENT_SOURCE, /uid >= 10000/)
+  assert.match(AGENT_SOURCE, /appId >= 10000 && appId <= 19999/)
+  assert.match(AGENT_SOURCE, /if \(!pkg\) return true/)
+  assert.match(AGENT_SOURCE, /started: function/)
   assert.equal(AGENT_SOURCE.includes('\nhookNative()\n'), false)
 })

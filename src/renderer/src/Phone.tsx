@@ -45,7 +45,8 @@ export function Phone({
     const showHooks = (s: { enabled: boolean; ready: boolean; starting: boolean; message: string }) => {
       setHooksOn(s.enabled)
       setHooksStarting(s.starting)
-      if (s.message) setHooksMsg(s.ready ? s.message : `Hooks unavailable: ${s.message}`)
+      // Only an enabled switch that failed to start is "unavailable". Turning it off is not a failure.
+      if (s.message) setHooksMsg(s.enabled && !s.ready && !s.starting ? `Hooks unavailable: ${s.message}` : s.message)
     }
     void window.api.hooksState().then(showHooks)
     return [

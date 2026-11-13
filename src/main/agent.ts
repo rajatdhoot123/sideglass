@@ -293,9 +293,9 @@ function currentPackage() {
   }
 }
 
-/** System and pool processes get no hooks. A normal app uid is 10000 or higher. */
+/** System and pool processes get no hooks. An unknown name is not hooked either. */
 function skipPackage(pkg) {
-  if (!pkg) return false
+  if (!pkg) return true
   if (pkg === 'android' || /^(zygote64|zygote|usap64|usap|webview_zygote|app_zygote)$/.test(pkg)) return true
   if (pkg.indexOf('com.android.') === 0) return true
   if (pkg.indexOf('com.google.android.gms') === 0) return true
@@ -305,13 +305,33 @@ function skipPackage(pkg) {
   return false
 }
 
-var hooksInstalled = false
+/** App uids are 10000-19999 within a user. Isolated processes (99000+) are not apps. */
+function isAppUid(uid) {
+  var appId = uid % 100000
+  return appId >= 10000 && appId <= 19999
+}
 
-function installJavaHooks() {
+var hooksInstalled = false
+var wantNative = false
+var running = false
+var nativeDone = false
+
+function runNative() {
+  if (nativeDone || !wantNative || !running) return
+  nativeDone = true
+  try { hookNative() } catch (e) { sgLog('warn', 'native hooks failed: ' + e) }
+}
+
+function installJavaHooks(hint, attempt) {
   if (hooksInstalled) return
   var uid = Number(Java.use('android.os.Process').myUid())
-  if (!(uid >= 10000)) return
-  var pkg = currentPackage()
+  if (!isAppUid(uid)) return
+  var pkg = hint || currentPackage()
+  if (!pkg && attempt < 30) {
+    // The app is not bound yet. Check again shortly, outside this Java.perform.
+    setTimeout(function () { queueJava(function () { installJavaHooks(hint, attempt + 1) }) }, 100)
+    return
+  }
   if (skipPackage(pkg)) return
   hooksInstalled = true
   sgLog('info', 'sideglass hooks loaded')
@@ -511,9 +531,8 @@ function installJavaHooks() {
   setTimeout(scanForVerdictClasses, 12000)
   // Native verify hooks wait until the process is running. Patching them before
   // resume crashed Flutter's raster thread while it loaded the emulator GLES driver.
-  setTimeout(function () {
-    try { hookNative() } catch (e) { sgLog('warn', 'native hooks failed: ' + e) }
-  }, 1500)
+  wantNative = true
+  runNative()
 }
 
 function queueJava(fn) {
@@ -524,17 +543,27 @@ function queueJava(fn) {
   }
 }
 
-// Nothing runs at load. The host calls prepare(): before resume for a Frida spawn,
-// after resume for a process forked from zygote (an icon tap). Calling Java.perform
-// while a zygote child is still paused deadlocks the VM.
+// Nothing runs at load. The host calls prepare({ pkg, running }): before resume for a
+// Frida spawn (then started() right after resume), after resume for a process forked
+// from zygote (an icon tap). Calling Java.perform while a zygote child is still paused
+// deadlocks the VM.
 rpc.exports = {
-  prepare: function () {
+  prepare: function (options) {
+    var pkg = options && options.pkg ? String(options.pkg) : ''
+    if (options && options.running) running = true
     if (typeof Java === 'undefined' || !Java.available) {
+      if (skipPackage(pkg)) return true
       sgLog('warn', 'no Java runtime; only native hooks applied')
-      setTimeout(function () { try { hookNative() } catch (e) {} }, 1500)
+      wantNative = true
+      runNative()
       return true
     }
-    queueJava(installJavaHooks)
+    queueJava(function () { installJavaHooks(pkg, 0) })
+    return true
+  },
+  started: function () {
+    running = true
+    runNative()
     return true
   },
 }
