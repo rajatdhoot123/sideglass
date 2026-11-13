@@ -42,17 +42,15 @@ export function Phone({
   const [refusal, setRefusal] = useState<Refusal | null>(null)
   useEffect(() => void window.api.apps().then(setApps), [])
   useEffect(() => {
-    void window.api.hooksState().then((s) => {
+    const showHooks = (s: { enabled: boolean; ready: boolean; starting: boolean; message: string }) => {
       setHooksOn(s.enabled)
       setHooksStarting(s.starting)
-    })
+      if (s.message) setHooksMsg(s.ready ? s.message : `Hooks unavailable: ${s.message}`)
+    }
+    void window.api.hooksState().then(showHooks)
     return [
       window.api.on('hooks-log', (line) => setHooksMsg(line)),
-      window.api.on('hooks-state', (s) => {
-        setHooksOn(s.enabled)
-        setHooksStarting(s.starting)
-        if (!s.ready && s.message) setHooksMsg(`Hooks unavailable: ${s.message}`)
-      }),
+      window.api.on('hooks-state', showHooks),
       window.api.on('app-refusal', (r) => setRefusal(r)),
     ].reduce((off, next) => {
       const prev = off
@@ -120,6 +118,7 @@ export function Phone({
       <div className="toolbar">
         <select
           defaultValue=""
+          title="Opens an installed app. With Hooks on, tapping its icon on the phone does the same."
           onChange={(e) => {
             if (e.target.value) void start(e.target.value)
           }}
@@ -132,7 +131,7 @@ export function Phone({
         {mode === 'virtual' && (
           <button
             className={hooksOn ? 'on' : ''}
-            title="Start apps through Frida: trust the Sideglass CA, drop certificate pinning, hide root and emulator checks, rewrite locally-read integrity verdicts"
+            title="Hook every app as it opens, including from its icon. Trusts the Sideglass CA, drops certificate pinning, hides root and emulator checks, and rewrites integrity verdicts the app reads locally. Close an already-open app once so it starts fresh."
             onClick={async () => {
               const s = await window.api.setHooks(!hooksOn)
               setHooksOn(s.enabled)

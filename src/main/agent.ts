@@ -280,15 +280,44 @@ function hookNative() {
   })
 }
 
-/* --- run --- */
+function currentPackage() {
+  try {
+    var thread = Java.use('android.app.ActivityThread').currentActivityThread()
+    if (thread === null) return ''
+    var bound = thread.mBoundApplication.value
+    if (bound === null) return ''
+    var name = bound.processName.value
+    return name ? String(name) : ''
+  } catch (e) {
+    return ''
+  }
+}
 
-hookNative()
+/** System and pool processes get no hooks. A normal app uid is 10000 or higher. */
+function skipPackage(pkg) {
+  if (!pkg) return false
+  if (pkg === 'android' || /^(zygote64|zygote|usap64|usap|webview_zygote|app_zygote)$/.test(pkg)) return true
+  if (pkg.indexOf('com.android.') === 0) return true
+  if (pkg.indexOf('com.google.android.gms') === 0) return true
+  if (pkg.indexOf('com.google.android.gsf') === 0) return true
+  if (pkg.indexOf('com.google.android.webview') === 0) return true
+  if (pkg.indexOf('com.google.android.ext.') === 0) return true
+  return false
+}
 
-if (Java.available) {
-  Java.perform(function () {
-    sgLog('info', 'sideglass hooks loaded')
+var hooksInstalled = false
 
-    sgTry('Build spoof', function () {
+function installJavaHooks() {
+  if (hooksInstalled) return
+  var uid = Number(Java.use('android.os.Process').myUid())
+  if (!(uid >= 10000)) return
+  var pkg = currentPackage()
+  if (skipPackage(pkg)) return
+  hooksInstalled = true
+  sgLog('info', 'sideglass hooks loaded')
+  send({ sg: 'hooked', pkg: pkg, pid: Process.id })
+
+  sgTry('Build spoof', function () {
       var Build = Java.use('android.os.Build')
       for (var field in BUILD_SPOOF) Build[field].value = BUILD_SPOOF[field]
     })
@@ -477,11 +506,36 @@ if (Java.available) {
       W.onReceivedSslError.implementation = function (view, handler, error) { handler.proceed() }
     })
 
-    scanForVerdictClasses()
-    setTimeout(scanForVerdictClasses, 4000)
-    setTimeout(scanForVerdictClasses, 12000)
-  })
-} else {
-  sgLog('warn', 'no Java runtime; only native hooks applied')
+  scanForVerdictClasses()
+  setTimeout(scanForVerdictClasses, 4000)
+  setTimeout(scanForVerdictClasses, 12000)
+  // Native verify hooks wait until the process is running. Patching them before
+  // resume crashed Flutter's raster thread while it loaded the emulator GLES driver.
+  setTimeout(function () {
+    try { hookNative() } catch (e) { sgLog('warn', 'native hooks failed: ' + e) }
+  }, 1500)
+}
+
+function queueJava(fn) {
+  try {
+    Java.perform(fn)
+  } catch (e) {
+    sgLog('warn', String(e))
+  }
+}
+
+// Nothing runs at load. The host calls prepare(): before resume for a Frida spawn,
+// after resume for a process forked from zygote (an icon tap). Calling Java.perform
+// while a zygote child is still paused deadlocks the VM.
+rpc.exports = {
+  prepare: function () {
+    if (typeof Java === 'undefined' || !Java.available) {
+      sgLog('warn', 'no Java runtime; only native hooks applied')
+      setTimeout(function () { try { hookNative() } catch (e) {} }, 1500)
+      return true
+    }
+    queueJava(installJavaHooks)
+    return true
+  },
 }
 `

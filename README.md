@@ -44,20 +44,22 @@ left; the phone is on the right, and you click and drag on it to use it.
     APK sites.
   - **From my phone:** pick an app on a USB-connected phone (USB debugging on) to copy it over.
   - **APK file:** drop APKs on the phone (split APKs together).
-- **Launch** an installed app from the list. With Hooks off, tick **Unpin** to spawn it with
-  only Sideglass's own unpinning script.
+- **Launch** an installed app from the list, or tap its icon on the phone. With Hooks on, both
+  start it with the agent. With Hooks off, tick **Unpin** to spawn it from the list with only
+  Sideglass's own unpinning script.
 - **Requests tools:** copy as cURL, replay, edit and replay, block a URL, or answer it with a
   mock body. Load a `.proto` to decode a protobuf or gRPC body with a schema.
 - **Saved sessions:** captures are kept in a local SQLite file. Search them, open one, or open
   a HAR file.
 - **Storage:** databases and shared preferences of the launched app, on a rooted phone or a
   debuggable app.
-- **Launch hooks** (the **Hooks** switch on the virtual phone, on by default): the app starts through
-  [Frida](https://frida.re) and gets an agent before its first line runs. The agent trusts the Sideglass
-  CA, drops certificate pinning (Java TLS and native BoringSSL), hides common root, emulator and injection
-  checks, and rewrites Play Integrity or SafetyNet verdicts the app reads locally. The Frida client runs
-  under system Node, because Electron cannot load Frida's native module. If the hooks cannot start, the
-  app still launches normally.
+- **Launch hooks** (the **Hooks** switch on the virtual phone, on by default): Sideglass watches
+  zygote, so an app gets the [Frida](https://frida.re) agent whether it is opened from the list or by
+  tapping its icon. The agent trusts the Sideglass CA, drops certificate pinning (Java TLS and native
+  BoringSSL), hides common root, emulator and injection checks, and rewrites Play Integrity or SafetyNet
+  verdicts the app reads locally. The Frida client runs under system Node, because Electron cannot load
+  Frida's native module. If the hooks cannot start, the app still launches normally. An app that was
+  already open before hooks armed has to be closed once so its next start is hooked.
 - **Refused to run:** when an app blocks itself anyway (root, emulator, integrity or a crash), the phone
   panel names the reason. A verdict the app's own server checks with Google cannot be changed from here.
 - **Clone app:** pick an installed app, give it a new package name and name, and Sideglass installs
