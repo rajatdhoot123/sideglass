@@ -93,12 +93,71 @@ function lockHeld(lockPath: string): boolean {
   }
 }
 
-/** `adb devices` drops the serial before qemu releases the AVD lock and console port. */
-async function waitForAvdRelease(sdk: Sdk, spec: PhoneSpec, serial: string): Promise<void> {
-  const deadline = Date.now() + 90_000
+/** Live pids from the AVD's lock files that belong to an emulator running this AVD. */
+async function lockOwners(spec: PhoneSpec): Promise<number[]> {
+  const dir = join(avdHome(), `${spec.avd}.avd`)
+  const pids = new Set<number>()
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.lock')) continue
+      const lockPath = join(dir, name)
+      const pidFile = existsSync(join(lockPath, 'pid')) ? join(lockPath, 'pid') : lockPath
+      try {
+        if (!statSync(pidFile).isFile()) continue
+        const pid = Number(readFileSync(pidFile, 'utf8').trim())
+        if (Number.isInteger(pid) && pid > 0 && lockHeld(lockPath)) pids.add(pid)
+      } catch {
+        // Lock vanished while reading: the emulator just exited.
+      }
+    }
+  } catch {
+    return []
+  }
+  const owners: number[] = []
+  for (const pid of pids) {
+    // Never signal a reused pid: only one whose command line runs this exact AVD.
+    const command = await run('ps', ['-p', String(pid), '-o', 'command='])
+      .then((result) => result.stdout)
+      .catch(() => '')
+    if (new RegExp(`(^|\\s)-avd\\s+${spec.avd}(\\s|$)`).test(command)) owners.push(pid)
+  }
+  return owners
+}
+
+function signal(pids: number[], sig: NodeJS.Signals): void {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, sig)
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+/**
+ * `adb devices` drops the serial before qemu releases the AVD lock and console port. A guest
+ * that is hung (often shown as `offline`) ignores `emu kill`, so escalate: ask again, then
+ * SIGTERM, then SIGKILL the qemu process that holds this AVD's lock.
+ */
+async function waitForAvdRelease(sdk: Sdk, spec: PhoneSpec, serial: string, log?: Log): Promise<void> {
+  const started = Date.now()
+  const deadline = started + 90_000
+  let stage = 0
   while (Date.now() < deadline) {
     const listed = (await Adb.devices(sdk.adb)).some((device) => device.serial === serial)
     if (!listed && !avdLocked(spec)) return
+    const waited = Date.now() - started
+    if (stage === 0 && waited > 15_000) {
+      stage = 1
+      log?.(`${serial} is slow to shut down. Asking it to stop again…`)
+      await new Adb(sdk.adb, serial).exec(['emu', 'kill']).catch(() => undefined)
+      signal(await lockOwners(spec), 'SIGTERM')
+    } else if (stage === 1 && waited > 35_000) {
+      stage = 2
+      const owners = await lockOwners(spec)
+      if (owners.length) log?.(`${serial} did not stop. Force-quitting it…`)
+      signal(owners, 'SIGKILL')
+    }
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
   throw new Error(
@@ -202,7 +261,7 @@ export async function startEmulator(
     await new Adb(sdk.adb, serial).exec(['emu', 'kill']).catch(() => undefined)
   }
   if ((await Adb.devices(sdk.adb)).some((device) => device.serial === serial) || avdLocked(spec)) {
-    await waitForAvdRelease(sdk, spec, serial)
+    await waitForAvdRelease(sdk, spec, serial, log)
   }
   // The exiting emulator writes its old config back. Repair the flag only after it is gone.
   const configChanged = enablePlayStore(spec)
