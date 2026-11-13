@@ -51,10 +51,10 @@ export function App() {
     const offs = [
       window.api.on('progress', (p) => setProgress((prev) => ({ ...prev, [p.step]: p }))),
       window.api.on('setup-log', (line) => setSetupLog((prev) => [...prev.slice(-200), line])),
-      window.api.on('exchange', (e) =>
+      window.api.on('exchanges', (batch) =>
         setExchanges((prev) => {
           const next = new Map(prev)
-          next.set(e.id, e)
+          for (const e of batch) next.set(e.id, e)
           return next
         }),
       ),

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Exchange, ExchangeSummary, ProxyRule, SavedSession } from '../../shared'
 import { toCurl } from '../../main/curl'
 import { FILTER_KEYS, parseFilter, RESOURCE_TYPES, resourceType, TYPE_LABELS, type ResourceType } from './netfilter'
@@ -32,6 +32,13 @@ function Headers({ headers }: { headers?: Record<string, string | string[] | und
     </table>
   )
 }
+
+const GOOGLE_HOST = /(^|\.)(google(apis)?\.com|gstatic\.com|gvt1\.com|googleusercontent\.com)$/
+const isGoogle = (host: string) => GOOGLE_HOST.test(host.replace(/:\d+$/, ''))
+
+/** Must match `.rows .row` height in the stylesheet. Only the rows on screen are drawn. */
+const ROW_HEIGHT = 22
+const OVERSCAN = 12
 
 const shortApp = (pkg?: string) => (pkg ? (pkg.split('.').pop() ?? pkg) : '')
 
@@ -95,17 +102,34 @@ export function Requests({
   useEffect(() => setDecoded(''), [selected])
 
   const matches = useMemo(() => parseFilter(filter), [filter])
-  const LIMIT = 1500
-  const matched = useMemo(() => {
+  const rows = useMemo(() => {
     const active = filter.trim() !== ''
-    return list
-      .filter((e) => app === '__all__' || e.app === app || (!picked && !e.app))
-      .filter((e) => !hideGoogle || !/(^|\.)(google(apis)?\.com|gstatic\.com|gvt1\.com|googleusercontent\.com)$/.test(e.host.replace(/:\d+$/, '')))
-      .filter((e) => types.size === 0 || types.has(resourceType(e)))
-      .filter((e) => !active || matches(e) !== invert)
+    return list.filter(
+      (e) =>
+        (app === '__all__' || e.app === app || (!picked && !e.app)) &&
+        (!hideGoogle || !isGoogle(e.host)) &&
+        (types.size === 0 || types.has(resourceType(e))) &&
+        (!active || matches(e) !== invert),
+    )
   }, [list, filter, matches, invert, types, hideGoogle, app, picked])
 
-  const rows = useMemo(() => matched.slice(-LIMIT), [matched])
+  const scroller = useRef<HTMLDivElement>(null)
+  /** First row index in view (not pixels), so scrolling within one row does not re-render. */
+  const [firstRow, setFirstRow] = useState(0)
+  const [viewHeight, setViewHeight] = useState(800)
+  useLayoutEffect(() => {
+    const el = scroller.current
+    if (!el) return
+    const observer = new ResizeObserver(() => setViewHeight(el.clientHeight))
+    observer.observe(el)
+    setViewHeight(el.clientHeight)
+    return () => observer.disconnect()
+  }, [])
+  // A filter can shrink the list below the old scroll position before the scroll event arrives.
+  const top = Math.min(firstRow, rows.length)
+  const start = Math.max(0, top - OVERSCAN)
+  const end = Math.min(rows.length, top + Math.ceil(viewHeight / ROW_HEIGHT) + OVERSCAN)
+  const visible = rows.slice(start, end)
 
   /** Click picks one type; Cmd/Ctrl-click adds or removes it, as in Chrome. */
   const pickType = (type: ResourceType | null, multi: boolean) => {
@@ -199,7 +223,7 @@ export function Requests({
         ))}
         <span className="spacer" />
         <span className="muted small">
-          {matched.length > LIMIT ? `showing last ${LIMIT} of ${matched.length} matched` : `${matched.length} matched`} · {list.length} total
+          {rows.length} matched · {list.length} total
         </span>
       </div>
       <div className="table">
@@ -213,8 +237,9 @@ export function Requests({
           <span>Size</span>
           <span>Time</span>
         </div>
-        <div className="rows">
-          {rows.map((e) => (
+        <div className="rows" ref={scroller} onScroll={(e) => setFirstRow(Math.floor(e.currentTarget.scrollTop / ROW_HEIGHT))}>
+          {start > 0 && <div style={{ height: start * ROW_HEIGHT }} />}
+          {visible.map((e) => (
             <div
               key={e.id}
               className={`row ${selected === e.id ? 'sel' : ''} ${e.state} ${e.status && e.status >= 400 ? 'bad' : ''}`}
@@ -234,6 +259,7 @@ export function Requests({
               <span>{e.durationMs !== undefined ? `${e.durationMs} ms` : ''}</span>
             </div>
           ))}
+          {end < rows.length && <div style={{ height: (rows.length - end) * ROW_HEIGHT }} />}
           {rows.length === 0 && (
             <div className="empty">{list.length > 0 && (filter.trim() || types.size > 0) ? 'No requests match the filter.' : app === '__all__' ? 'Use an app on the phone. Its requests show up here.' : `No requests for ${shortApp(app)} yet.`}</div>
           )}
