@@ -54,9 +54,13 @@ button:hover { border-color: var(--accent); }
 .right { display: flex; flex-direction: column; gap: 8px; padding: 10px; background: var(--panel); min-width: 0; min-height: 0; overflow: hidden; }
 .right.drop { outline: 2px dashed var(--accent); outline-offset: -6px; }
 .tabs, .subtabs { display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid var(--line); align-items: center; }
+/* Keep one row: labels never wrap inside a button, the phone menu gives up width first, and only a
+   very narrow window scrolls the row sideways. */
+.tabs { overflow-x: auto; scrollbar-width: none; }
+.tabs > button { white-space: nowrap; flex-shrink: 0; }
 .tabs button.on, .subtabs button.on { border-color: var(--accent); color: var(--accent); }
 .spacer { flex: 1; }
-.count { background: var(--line); border-radius: 9px; padding: 0 6px; margin-left: 4px; font-size: 11px; }
+.count { display: inline-block; background: var(--line); border-radius: 9px; padding: 0 6px; margin-left: 4px; font-size: 11px; }
 .count.warn { background: var(--warn); color: #000; }
 .filterbar { display: flex; gap: 10px; padding: 8px; align-items: center; border-bottom: 1px solid var(--line); }
 .filterbar input[type='text'], .filterbar input[type='search'], .filterbar input:not([type]) { flex: 1; min-width: 0; }
@@ -175,7 +179,7 @@ button.on { border-color: var(--accent); color: var(--accent); }
 .setup-actions { display: flex; gap: 8px; }
 .modal.settings { height: auto; max-height: 80vh; }
 .modal.settings .modal-body { padding: 0 12px 12px; }
-.device-switch { max-width: 240px; }
+.device-switch { flex: 0 1 240px; min-width: 110px; text-overflow: ellipsis; }
 .modal.clone { width: 520px; }
 .modal.clone .modal-body { display: flex; flex-direction: column; gap: 10px; }
 .modal.clone label:not(.check) { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
