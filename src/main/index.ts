@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron'
 import type { ExchangeSummary, KeyEvent, Settings } from '../shared'
 import type { ReplayEdit } from './replay'
 import type { ProxyRule } from './rules'
@@ -245,6 +245,21 @@ ipcMain.handle('code:file', (_, pkg: string, file: string) => requireSession().c
 ipcMain.handle('code:search', (_, pkg: string, query: string, options?: CodeSearchOptions) =>
   requireSession().searchCode(pkg, String(query), { skipLibraries: Boolean(options?.skipLibraries), matchCase: Boolean(options?.matchCase) }),
 )
+ipcMain.handle('code:export', async (_, pkg: string) => {
+  const current = requireSession()
+  const picked = await dialog.showOpenDialog({
+    title: `Export the decompiled code of ${pkg}`,
+    buttonLabel: 'Export here',
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  if (picked.canceled || !picked.filePaths[0]) return null
+  const dir = picked.filePaths[0]
+  // A new folder, so an export never mixes with files already there.
+  const folder = join(dir, unusedName(current.codeExportName(pkg), (name) => existsSync(join(dir, name))))
+  const count = await current.exportCode(pkg, folder)
+  shell.showItemInFolder(folder)
+  return { path: folder, count }
+})
 ipcMain.handle('sms:send', (_, device: Device, from: string, text: string) => requireSession().sendSms(device, from, text))
 ipcMain.handle('har:export', async () => {
   const s = requireSession()

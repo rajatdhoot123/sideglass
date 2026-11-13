@@ -54,6 +54,7 @@ left; the phone is on the right, and you click and drag on it to use it.
   first use; needs Java) and read it in the window: a package tree, a search across every file (well-known
   libraries left out by default), and ⌘-click on a class name to open it. **Find in code** on a request
   searches for the hand-written part of its path, which is usually what a Retrofit annotation holds.
+  **Export…** copies the decompiled sources and resources into a folder, to open in an editor or IDE.
   The result is kept per app version, so it opens instantly next time.
 - **Storage:** databases and shared preferences of the launched app, on a rooted phone or a
   debuggable app.

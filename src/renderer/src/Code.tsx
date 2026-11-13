@@ -37,6 +37,8 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
   const [back, setBack] = useState<OpenFile[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [filter, setFilter] = useState('')
+  const [exported, setExported] = useState('')
+  const [exporting, setExporting] = useState(false)
   const pendingSearch = useRef<string | null>(null)
   const pkgRef = useRef(pkg)
   pkgRef.current = pkg
@@ -89,6 +91,7 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
     setFile(null)
     setBack([])
     setProgress(null)
+    setExported('')
     loadIndex(pkg)
   }, [pkg, loadIndex])
 
@@ -200,6 +203,25 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
             {index ? (index.stale ? 'Decompile new version' : 'Decompile again') : 'Decompile'}
           </button>
         )}
+        {index && !running && (
+          <button
+            disabled={exporting}
+            title="Copy the decompiled Java sources and resources into a folder, to open in an editor or IDE"
+            onClick={() => {
+              setExporting(true)
+              setError('')
+              void window.api
+                .exportCode(index.pkg)
+                .then(
+                  (result) => result && setExported(`Exported ${result.count.toLocaleString()} files to ${result.path}`),
+                  (reason: Error) => setError(reason.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')),
+                )
+                .finally(() => setExporting(false))
+            }}
+          >
+            {exporting ? 'Exporting…' : 'Export…'}
+          </button>
+        )}
         {running && (
           <span className="code-progress">
             {progress.percent !== undefined && <progress max={100} value={progress.percent} />}
@@ -218,6 +240,7 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
         )}
       </div>
       {error && <p className="error code-error">{error}</p>}
+      {exported && <p className="muted code-error">{exported}</p>}
       {!pkg && <p className="empty">Pick an installed app to decompile it.</p>}
       {pkg && !index && !indexLoading && !running && (
         <div className="empty code-intro">

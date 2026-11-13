@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { cp, readdir, readFile, stat } from 'node:fs/promises'
 import { cpus, totalmem } from 'node:os'
 import { join, relative, resolve, sep } from 'node:path'
 import type { Adb } from './adb'
@@ -315,6 +315,26 @@ export class Decompiler {
         reject(new Error(`jadx exited ${code}${last ? `: ${last}` : ''}`))
       })
     })
+  }
+
+  /** A folder name for an export, e.g. "org.tasks-14.2.1-decompiled". */
+  exportName(pkg: string): string {
+    const version = /^(\S+)/.exec(this.readMeta(pkg)?.version ?? '')?.[1]
+    return `${pkg}${version && version !== '?' ? `-${version.replace(/[^\w.-]/g, '_')}` : ''}-decompiled`
+  }
+
+  /** Copy the decompiled sources and resources into [target], a folder that must not exist yet. */
+  async export(pkg: string, target: string): Promise<number> {
+    const out = this.outDir(pkg)
+    if (!existsSync(join(out, 'sources'))) throw new Error(`${pkg} has not been decompiled yet`)
+    if (existsSync(target)) throw new Error(`${target} already exists`)
+    try {
+      await cp(out, target, { recursive: true, errorOnExist: true })
+    } catch (error) {
+      rmSync(target, { recursive: true, force: true })
+      throw error
+    }
+    return (await this.files(pkg)).length
   }
 
   async read(pkg: string, file: string): Promise<string> {

@@ -126,6 +126,8 @@ export interface Api {
   codeIndex(pkg: string): Promise<CodeIndex | null>
   codeFile(pkg: string, file: string): Promise<string>
   searchCode(pkg: string, query: string, options?: CodeSearchOptions): Promise<CodeSearch>
+  /** Copy the decompiled code into a new folder the user picks. Null when the dialog is cancelled. */
+  exportCode(pkg: string): Promise<{ path: string; count: number } | null>
   sendSms(device: Device, from: string, text: string): Promise<void>
   exportHar(): Promise<string | null>
   /**

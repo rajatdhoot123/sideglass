@@ -55,6 +55,7 @@ contextBridge.exposeInMainWorld('api', {
   codeIndex: invoke('code:index'),
   codeFile: invoke('code:file'),
   searchCode: invoke('code:search'),
+  exportCode: invoke('code:export'),
   sendSms: invoke('sms:send'),
   exportHar: invoke('har:export'),
   saveCalls: invoke('calls:save'),

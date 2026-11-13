@@ -571,6 +571,14 @@ export class Session extends EventEmitter {
     return this.decompiler.index(pkg, this.device)
   }
 
+  codeExportName(pkg: string): string {
+    return this.decompiler.exportName(pkg)
+  }
+
+  exportCode(pkg: string, target: string): Promise<number> {
+    return this.decompiler.export(pkg, target)
+  }
+
   codeFile(pkg: string, file: string): Promise<string> {
     return this.decompiler.read(pkg, file)
   }
