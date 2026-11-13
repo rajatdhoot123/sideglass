@@ -59,6 +59,15 @@ function enablePlayStore(spec: PhoneSpec): boolean {
   return true
 }
 
+/**
+ * The pid in an AVD lock file. qemu NUL-terminates it (`"65385\0"`), which `trim()` keeps, so
+ * strip NULs too. Returns 0 for an empty file and NaN for anything that is not a pid.
+ */
+export function parseLockPid(text: string): number {
+  const cleaned = text.replace(/\0/g, '').trim()
+  return cleaned ? Number(cleaned) : 0
+}
+
 /** A lock whose pid is still running. Stale locks left by a crash do not count. */
 function avdLocked(spec: PhoneSpec): boolean {
   const dir = join(avdHome(), `${spec.avd}.avd`)
@@ -82,9 +91,9 @@ function lockHeld(lockPath: string): boolean {
   // An empty file carries no pid. multiinstance.lock is always empty (qemu holds it with an
   // OS file lock), and stays behind after `emu kill`. A running emulator also writes its pid to
   // hardware-qemu.ini.lock, so treating an empty file as free never misses a live one.
-  if (!text.trim()) return false
-  const pid = Number(text.trim())
-  if (!Number.isInteger(pid) || pid <= 0) return true
+  const pid = parseLockPid(text)
+  if (pid === 0) return false
+  if (!Number.isInteger(pid) || pid < 0) return true
   try {
     process.kill(pid, 0)
     return true
@@ -104,7 +113,7 @@ async function lockOwners(spec: PhoneSpec): Promise<number[]> {
       const pidFile = existsSync(join(lockPath, 'pid')) ? join(lockPath, 'pid') : lockPath
       try {
         if (!statSync(pidFile).isFile()) continue
-        const pid = Number(readFileSync(pidFile, 'utf8').trim())
+        const pid = parseLockPid(readFileSync(pidFile, 'utf8'))
         if (Number.isInteger(pid) && pid > 0 && lockHeld(lockPath)) pids.add(pid)
       } catch {
         // Lock vanished while reading: the emulator just exited.
