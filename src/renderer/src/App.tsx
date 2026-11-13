@@ -7,9 +7,10 @@ import { Logs } from './Logs'
 import { Refused } from './Refused'
 import { Setup } from './Setup'
 import { Storage } from './Storage'
+import { Code, type CodeRequest } from './Code'
 import { Timeline } from './Timeline'
 
-type Tab = 'requests' | 'timeline' | 'logs' | 'refused' | 'storage'
+type Tab = 'requests' | 'timeline' | 'logs' | 'refused' | 'storage' | 'code'
 
 export function App() {
   const [progress, setProgress] = useState<Record<string, Progress>>({})
@@ -28,6 +29,7 @@ export function App() {
   const [unpinRequest, setUnpinRequest] = useState<{ pkg: string; n: number } | null>(null)
   const [protoTypes, setProtoTypes] = useState<string[]>([])
   const [archive, setArchive] = useState<ExchangeSummary[] | null>(null)
+  const [codeRequest, setCodeRequest] = useState<CodeRequest | null>(null)
   const ready = progress.ready?.state === 'done'
 
   /** Save the phone choice and start a fresh session with it. */
@@ -134,6 +136,9 @@ export function App() {
           <button className={tab === 'storage' ? 'on' : ''} onClick={() => setTab('storage')}>
             Storage
           </button>
+          <button className={tab === 'code' ? 'on' : ''} onClick={() => setTab('code')} title="Decompile an app and read its code">
+            Code
+          </button>
           <div className="spacer" />
           <DeviceSwitch current={settings} onSave={(s) => void choose(s)} />
           <button
@@ -172,12 +177,20 @@ export function App() {
             onLive={() => setArchive(null)}
             onArchive={setArchive}
             onLoadProto={() => void window.api.loadProto().then(setProtoTypes)}
+            onFindInCode={(pkg, query) => {
+              setCodeRequest({ pkg, query, n: Date.now() })
+              setTab('code')
+            }}
           />
         )}
         {tab === 'timeline' && <Timeline inputs={inputs} requests={list} />}
         {tab === 'logs' && <Logs lines={logs} pid={appPid} />}
         {tab === 'refused' && <Refused list={refused} onUnpin={(pkg) => setUnpinRequest({ pkg, n: Date.now() })} />}
         {tab === 'storage' && <Storage pkg={focusApp} />}
+        {/* Kept mounted so the open file, tree and search survive a trip to another tab. */}
+        <div className={tab === 'code' ? 'code-host' : 'code-host hidden'}>
+          <Code focusApp={focusApp} request={codeRequest} />
+        </div>
       </section>
       <Phone
         mode={settings.phone}

@@ -51,6 +51,12 @@ left; the phone is on the right, and you click and drag on it to use it.
   mock body. Load a `.proto` to decode a protobuf or gRPC body with a schema.
 - **Saved sessions:** captures are kept in a local SQLite file. Search them, open one, or open
   a HAR file.
+- **Code:** decompile an installed app with [jadx](https://github.com/skylot/jadx) (Apache-2.0, downloaded on
+  first use; needs Java) and read it in the window: a package tree, a search across every file (well-known
+  libraries left out by default), and ⌘-click on a class name to open it. **Find in code** on a request
+  searches for the hand-written part of its path, which is usually what a Retrofit annotation holds.
+  **Export…** copies the decompiled sources and resources into a folder, to open in an editor or IDE.
+  The result is kept per app version, so it opens instantly next time.
 - **Storage:** databases and shared preferences of the launched app, on a rooted phone or a
   debuggable app.
 - **Launch hooks** (the **Hooks** switch on the virtual phone, on by default): Sideglass watches
@@ -114,6 +120,7 @@ Pushing a `v*` tag builds macOS, Linux and Windows packages in GitHub Actions.
 | Launch hooks and unpinning | [Frida](https://frida.re) 17.26.2 (wxWindows Library Licence). `frida-server` is downloaded on first use and pushed to the phone (non-standard port). The host library runs under system Node (`scripts/hooks-host.mjs`, `scripts/frida-host.mjs`), because Electron's Node ABI is different. The agent (`src/main/agent.ts`) and unpinning script are original; the HTTP Toolkit script is AGPL and is not included |
 | Screen | [scrcpy](https://github.com/Genymobile/scrcpy) server (Apache-2.0, downloaded on first use) via [Tango](https://tangoadb.dev/scrcpy/) (MIT): H.264, decoded with WebCodecs. Screenshots if the stream cannot start |
 | Clone app | Binary manifest and resource table rewritten in place; [apktool](https://apktool.org) only when the dex has the names too; SDK `zipalign` and `apksigner` |
+| Decompiler | [jadx](https://github.com/skylot/jadx) 1.5.6 (Apache-2.0), downloaded on first use and checked against its release digest; run with the same Java as Clone app |
 | History | `node:sqlite` |
 
 ## Limits

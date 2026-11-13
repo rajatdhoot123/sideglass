@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Exchange, ExchangeSummary, ProxyRule, SavedSession, SaveFormat, SaveLayout } from '../../shared'
 import { toCurl } from '../../main/curl'
+import { codeQueryFor } from './codequery'
 import { FILTER_KEYS, parseFilter, RESOURCE_TYPES, resourceType, TYPE_LABELS, type ResourceType } from './netfilter'
 
 const size = (n?: number) => (n === undefined ? '' : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} kB` : `${(n / 1048576).toFixed(1)} MB`)
@@ -87,6 +88,7 @@ export function Requests({
   onLive,
   onArchive,
   onLoadProto,
+  onFindInCode,
 }: {
   list: ExchangeSummary[]
   focusApp: string | null
@@ -95,6 +97,8 @@ export function Requests({
   onLive: () => void
   onArchive: (rows: ExchangeSummary[]) => void
   onLoadProto: () => void
+  /** Search the decompiled app for where this request is built. */
+  onFindInCode: (pkg: string | null, query: string) => void
 }) {
   const [filter, setFilter] = useState('')
   const [invert, setInvert] = useState(false)
@@ -424,6 +428,12 @@ export function Requests({
               Copy as cURL
             </button>
             <button onClick={() => void window.api.replay(detail.id).catch((error: Error) => setDecoded(error.message))}>Replay</button>
+            <button
+              title="Search the app's decompiled code for this endpoint"
+              onClick={() => onFindInCode(detail.app ?? (focusApp && focusApp !== '__all__' ? focusApp : null), codeQueryFor(detail.url))}
+            >
+              Find in code
+            </button>
             <button
               onClick={() => {
                 setEditing((open) => !open)

@@ -5,6 +5,7 @@ import type { ProxyRule } from './main/rules'
 import type { ReplayEdit } from './main/replay'
 import type { Progress } from './main/session'
 import type { StorageEntry } from './main/storage'
+import type { CodeHit, CodeIndex, CodeProgress, CodeSearch, CodeSearchOptions } from './main/decompile'
 import type { Refusal, RefusalKind } from './main/refusal'
 import type { HooksSnapshot } from './main/hooks'
 import type { StoreApp } from './main/store/fdroid'
@@ -12,6 +13,7 @@ import type { UsbPhone } from './main/store/usb'
 import type { CloneOptions, CloneResult } from './main/clone'
 import type { SaveFormat, SaveLayout } from './main/export-calls'
 
+export type { CodeHit, CodeIndex, CodeProgress, CodeSearch, CodeSearchOptions }
 export type { CloneOptions, CloneResult, LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput, ProxyRule, ReplayEdit, StorageEntry, Refusal, RefusalKind, HooksSnapshot, SaveFormat, SaveLayout }
 /** Where a save wrote, and how many requests made it into the file or folder. */
 export interface SaveResult {
@@ -117,6 +119,15 @@ export interface Api {
   loadSession(id: string): Promise<ExchangeSummary[]>
   openHar(): Promise<ExchangeSummary[] | null>
   storage(pkg: string): Promise<StorageEntry[]>
+  /** Pull an installed app and decompile it with jadx. Reuses the last copy of the same version unless `force`. */
+  decompile(pkg: string, force?: boolean): Promise<CodeIndex>
+  cancelDecompile(pkg: string): Promise<void>
+  /** The decompiled copy of an app, or null if it was never decompiled. */
+  codeIndex(pkg: string): Promise<CodeIndex | null>
+  codeFile(pkg: string, file: string): Promise<string>
+  searchCode(pkg: string, query: string, options?: CodeSearchOptions): Promise<CodeSearch>
+  /** Copy the decompiled code into a new folder the user picks. Null when the dialog is cancelled. */
+  exportCode(pkg: string): Promise<{ path: string; count: number } | null>
   sendSms(device: Device, from: string, text: string): Promise<void>
   exportHar(): Promise<string | null>
   /**
@@ -138,6 +149,7 @@ export interface Api {
   on(channel: 'hooks-log', cb: (line: string) => void): () => void
   on(channel: 'hooks-state', cb: (snapshot: HooksSnapshot) => void): () => void
   on(channel: 'app-refusal', cb: (refusal: Refusal) => void): () => void
+  on(channel: 'code-progress', cb: (progress: CodeProgress) => void): () => void
 }
 
 declare global {

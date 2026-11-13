@@ -12,6 +12,7 @@ import { sendReplay, type ReplayEdit } from './replay'
 import { ProtoSchema } from './schema'
 import { ensureSdk } from './sdk'
 import { readAppStorage, type StorageEntry } from './storage'
+import { Decompiler, type CodeIndex, type CodeSearch, type CodeSearchOptions } from './decompile'
 import { installApks, isPackageName, pullApp } from './store/apk'
 import { cloneApp, type CloneOptions, type CloneResult } from './clone'
 import { hasPlayStore, needsPlayLicense } from './playstore'
@@ -618,6 +619,41 @@ export class Session extends EventEmitter {
     const exchanges = fromHar(text)
     for (const exchange of exchanges) this.opened.set(exchange.id, exchange)
     return exchanges.map(summarize)
+  }
+
+  private decompilerInstance: Decompiler | null = null
+  private get decompiler(): Decompiler {
+    this.decompilerInstance ??= new Decompiler(this.dataDir, (p) => this.emit('code-progress', p))
+    return this.decompilerInstance
+  }
+
+  /** Decompile an installed app with jadx. A copy of the same version is reused unless [force]. */
+  decompile(pkg: string, force?: boolean): Promise<CodeIndex> {
+    return this.decompiler.decompile(this.requireAdb(), pkg, Boolean(force))
+  }
+
+  cancelDecompile(pkg: string): void {
+    this.decompiler.cancel(pkg)
+  }
+
+  codeIndex(pkg: string): Promise<CodeIndex | null> {
+    return this.decompiler.index(pkg, this.device)
+  }
+
+  codeExportName(pkg: string): string {
+    return this.decompiler.exportName(pkg)
+  }
+
+  exportCode(pkg: string, target: string): Promise<number> {
+    return this.decompiler.export(pkg, target)
+  }
+
+  codeFile(pkg: string, file: string): Promise<string> {
+    return this.decompiler.read(pkg, file)
+  }
+
+  searchCode(pkg: string, query: string, options?: CodeSearchOptions): Promise<CodeSearch> {
+    return this.decompiler.search(pkg, query, options)
   }
 
   storage(pkg: string): Promise<StorageEntry[]> {
