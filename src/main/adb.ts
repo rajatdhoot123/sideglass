@@ -25,10 +25,11 @@ export class Adb {
       .map(([serial, state]) => ({ serial, state }))
   }
 
-  async exec(args: string[], timeoutMs = 60_000): Promise<string> {
+  async exec(args: string[], timeoutMs = 60_000, signal?: AbortSignal): Promise<string> {
     const { stdout } = await run(this.adbPath, ['-s', this.serial, ...args], {
       timeout: timeoutMs,
       maxBuffer: 64 * 1024 * 1024,
+      signal,
     })
     return stdout
   }
@@ -42,8 +43,8 @@ export class Adb {
     return stdout
   }
 
-  shell(command: string, timeoutMs?: number): Promise<string> {
-    return this.exec(['shell', command], timeoutMs)
+  shell(command: string, timeoutMs?: number, signal?: AbortSignal): Promise<string> {
+    return this.exec(['shell', command], timeoutMs, signal)
   }
 
   spawn(args: string[]): ChildProcess {
