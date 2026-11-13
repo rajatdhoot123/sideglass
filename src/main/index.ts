@@ -2,13 +2,14 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme } from 'electron'
-import type { KeyEvent, Settings } from '../shared'
+import type { ExchangeSummary, KeyEvent, Settings } from '../shared'
 import type { ReplayEdit } from './replay'
 import type { ProxyRule } from './rules'
 import { fileNames, parseSaveRequest, renderCalls, saveExtension, saveFilterName, unusedName } from './export-calls'
 import { toHar } from './har'
 import { publicExchange } from './proxy'
 import { appendLog, installQuietLog } from './quiet'
+import { Batcher } from './batch'
 import { Session } from './session'
 import { loadSettings, saveSettings } from './settings'
 import { findSdk, sdkAt } from './sdk'
@@ -17,6 +18,8 @@ import type { CloneOptions } from '../shared'
 
 let session: Session | null = null
 let window: BrowserWindow | null = null
+/** Busy apps make hundreds of requests a second. The window gets them in batches, not one by one. */
+let exchangeBatch: Batcher<ExchangeSummary> | null = null
 
 function send(channel: string, ...args: unknown[]): void {
   if (window && !window.isDestroyed()) window.webContents.send(channel, ...args)
@@ -73,7 +76,10 @@ ipcMain.handle('session:start', async () => {
   current.on('hooks-log', (l) => send('hooks-log', l))
   current.on('hooks-state', (s) => send('hooks-state', s))
   current.on('app-refusal', (r) => send('app-refusal', r))
-  current.proxy.on('exchange', (e) => send('exchange', e))
+  exchangeBatch?.discard()
+  const batch = new Batcher<ExchangeSummary>((items) => send('exchanges', items))
+  exchangeBatch = batch
+  current.proxy.on('exchange', (e: ExchangeSummary) => batch.push(e))
   current.proxy.on('tls-failure', (f) => send('tls-failure', f))
   try {
     await current.start()
@@ -99,6 +105,7 @@ ipcMain.handle('exchange:get', (_, id: string) => {
 })
 ipcMain.handle('capture:clear', () => {
   const current = requireSession()
+  exchangeBatch?.discard()
   current.proxy.clear()
   current.timeline.clear()
 })

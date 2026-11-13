@@ -126,7 +126,7 @@ export interface Api {
   saveCalls(ids: string[], format: SaveFormat, layout: SaveLayout): Promise<SaveResult | null>
   on(channel: 'progress', cb: (p: Progress) => void): () => void
   on(channel: 'setup-log', cb: (line: string) => void): () => void
-  on(channel: 'exchange', cb: (e: ExchangeSummary) => void): () => void
+  on(channel: 'exchanges', cb: (batch: ExchangeSummary[]) => void): () => void
   on(channel: 'tls-failure', cb: (f: TlsFailure) => void): () => void
   on(channel: 'frame', cb: (device: Device, png: Uint8Array) => void): () => void
   on(channel: 'video', cb: (device: Device, packet: VideoPacket) => void): () => void

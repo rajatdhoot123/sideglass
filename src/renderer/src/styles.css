@@ -101,6 +101,8 @@ button:hover { border-color: var(--accent); }
 .rows { overflow: auto; flex: 1; }
 .row { display: grid; grid-template-columns: 72px 58px 52px 110px minmax(110px, 180px) minmax(80px, 1fr) 64px 58px; gap: 8px; padding: 3px 8px; white-space: nowrap; cursor: default; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 .row span { overflow: hidden; text-overflow: ellipsis; }
+/* Fixed height: the request table only draws visible rows (ROW_HEIGHT in Requests.tsx). */
+.rows .row { height: 22px; box-sizing: border-box; align-items: center; }
 .row.head { color: var(--muted); border-bottom: 1px solid var(--line); font-family: inherit; }
 .row:not(.head):hover { background: var(--hover); }
 .row.sel { background: var(--sel); }
