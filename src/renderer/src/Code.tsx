@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { CodeIndex, CodeProgress, CodeSearch } from '../../shared'
+import { pendingCodeSearch } from './codequery'
 import { buildTree, classPathFor, highlightJava, type TreeNode } from './codeview'
 
 /** Ask the Code tab to search, e.g. from "Find in code" on a request. */
@@ -44,11 +45,15 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
   pkgRef.current = pkg
   const fileRef = useRef(file)
   fileRef.current = file
+  /** The decompile that is actually running. Cleared only when that call finishes, not when another click's error does. */
+  const job = useRef<{ pkg: string; gen: number } | null>(null)
+  const nextGen = useRef(0)
+  const [runningPkg, setRunningPkg] = useState<string | null>(null)
 
   useEffect(() => {
     void window.api.apps().then(setApps, () => setApps([]))
     return window.api.on('code-progress', (p) => {
-      if (p.pkg === pkgRef.current) setProgress(p)
+      if (p.pkg === pkgRef.current || p.pkg === job.current?.pkg) setProgress(p)
     })
   }, [])
 
@@ -65,6 +70,7 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
       setPkg(request.pkg)
     }
     setQuery(request.query)
+    setResults(null)
     pendingSearch.current = request.query
   }, [request])
 
@@ -90,8 +96,9 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
     setResults(null)
     setFile(null)
     setBack([])
-    setProgress(null)
     setExported('')
+    // A package change must not hide Cancel for the job that is still running.
+    if (!job.current) setProgress(null)
     loadIndex(pkg)
   }, [pkg, loadIndex])
 
@@ -111,31 +118,39 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
     [index, skipLibraries, matchCase],
   )
 
-  // A search asked for before the index was ready runs as soon as it is.
+  // Run a Find in code search once the open tree is the app it asked for.
   useEffect(() => {
-    if (index && pendingSearch.current) {
-      const text = pendingSearch.current
-      pendingSearch.current = null
-      runSearch(text)
-    }
-  }, [index, runSearch])
+    const text = pendingCodeSearch(index?.pkg ?? null, request?.pkg ?? null, pendingSearch.current)
+    if (!text) return
+    pendingSearch.current = null
+    runSearch(text)
+  }, [index, request, runSearch])
 
   const decompile = async (force: boolean) => {
-    if (!pkg) return
+    if (!pkg || job.current) return
+    const gen = ++nextGen.current
+    const name = pkg
+    job.current = { pkg: name, gen }
+    setRunningPkg(name)
     setBusy(true)
     setError('')
-    setProgress({ pkg, message: 'Starting…' })
+    setProgress({ pkg: name, message: 'Starting…' })
     try {
-      const next = await window.api.decompile(pkg, force)
-      if (pkgRef.current === pkg) {
+      const next = await window.api.decompile(name, force)
+      if (pkgRef.current === name) {
         setIndex(next)
-        setExpanded(new Set(initialExpanded(pkg)))
+        setExpanded(new Set(initialExpanded(name)))
       }
     } catch (reason) {
       const message = (reason as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
       if (message !== 'Cancelled') setError(message)
     } finally {
-      setBusy(false)
+      if (job.current?.gen === gen) {
+        job.current = null
+        setRunningPkg(null)
+        setBusy(false)
+        if (pkgRef.current !== name) setProgress(null)
+      }
     }
   }
 
@@ -176,7 +191,8 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
   }
 
   const appOptions = useMemo(() => [...new Set([...(pkg ? [pkg] : []), ...apps])].sort(), [apps, pkg])
-  const running = busy && progress && !progress.done
+  const running = runningPkg !== null
+  const jobProgress = running && progress?.pkg === runningPkg ? progress : null
 
   return (
     <div className="code">
@@ -196,8 +212,8 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
             </option>
           ))}
         </select>
-        {running ? (
-          <button onClick={() => void window.api.cancelDecompile(pkg)}>Cancel</button>
+        {running && runningPkg ? (
+          <button onClick={() => void window.api.cancelDecompile(runningPkg)}>Cancel</button>
         ) : (
           <button className={index && !index.stale ? '' : 'primary'} disabled={!pkg || busy} onClick={() => void decompile(Boolean(index))}>
             {index ? (index.stale ? 'Decompile new version' : 'Decompile again') : 'Decompile'}
@@ -222,12 +238,12 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
             {exporting ? 'Exporting…' : 'Export…'}
           </button>
         )}
-        {running && (
+        {jobProgress && (
           <span className="code-progress">
-            {progress.percent !== undefined && <progress max={100} value={progress.percent} />}
+            {jobProgress.percent !== undefined && <progress max={100} value={jobProgress.percent} />}
             <span className="muted">
-              {progress.message}
-              {progress.percent !== undefined ? ` ${progress.percent}%` : ''}
+              {jobProgress.message}
+              {jobProgress.percent !== undefined ? ` ${jobProgress.percent}%` : ''}
             </span>
           </span>
         )}
@@ -278,7 +294,14 @@ export function Code({ focusApp, request }: { focusApp: string | null; request: 
             </form>
             {searching && <p className="muted pad">Searching…</p>}
             {results && !searching ? (
-              <SearchResults results={results} query={searched} current={file} onOpen={(path, line) => void open(path, line)} onClose={() => setResults(null)} />
+              <SearchResults
+                results={results}
+                query={searched}
+                matchCase={matchCase}
+                current={file}
+                onOpen={(path, line) => void open(path, line)}
+                onClose={() => setResults(null)}
+              />
             ) : (
               !searching && (
                 <>
@@ -376,12 +399,14 @@ function Tree({
 function SearchResults({
   results,
   query,
+  matchCase,
   current,
   onOpen,
   onClose,
 }: {
   results: CodeSearch
   query: string
+  matchCase: boolean
   current: OpenFile | null
   onOpen: (path: string, line: number) => void
   onClose: () => void
@@ -415,7 +440,7 @@ function SearchResults({
               onClick={() => onOpen(path, hit.line)}
             >
               <span className="ln">{hit.line}</span>
-              <span>{mark(hit.text, query, false)}</span>
+              <span>{mark(hit.text, query, matchCase)}</span>
             </div>
           ))}
         </div>

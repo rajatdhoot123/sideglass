@@ -38,6 +38,16 @@ function safeDecode(segment: string): string {
   }
 }
 
+/**
+ * The pending query to run against [indexPkg], or null while the open tree is still another app.
+ * A request with no package searches whatever is already open.
+ */
+export function pendingCodeSearch(indexPkg: string | null, requestPkg: string | null, pending: string | null): string | null {
+  if (!pending || !indexPkg) return null
+  if (requestPkg && requestPkg !== indexPkg) return null
+  return pending
+}
+
 /** A path segment that was probably typed by a developer, not generated at runtime. */
 export function looksStatic(segment: string): boolean {
   if (!segment || segment.length > 40) return false

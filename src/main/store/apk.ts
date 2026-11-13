@@ -3,25 +3,33 @@ import { join } from 'node:path'
 import type { Adb } from '../adb'
 
 /** Every APK file of an installed app (base plus splits), as `pm path` lists them. */
-export async function apkPaths(adb: Adb, pkg: string): Promise<string[]> {
-  const out = await adb.shell(`pm path ${pkg}`).catch(() => '')
+export async function apkPaths(adb: Adb, pkg: string, signal?: AbortSignal): Promise<string[]> {
+  let out = ''
+  try {
+    out = await adb.shell(`pm path ${pkg}`, undefined, signal)
+  } catch (error) {
+    if (signal?.aborted) throw error
+    out = ''
+  }
   return out
     .split('\n')
     .map((l) => l.trim().replace(/^package:/, ''))
     .filter((p) => p.endsWith('.apk'))
 }
 
-/** Copy an installed app's APK files from a device to [dir]/[pkg]/. */
-export async function pullApp(adb: Adb, pkg: string, dir: string): Promise<string[]> {
-  const remote = await apkPaths(adb, pkg)
+/** Copy an installed app's APK files from a device to [dir]/[pkg]/. [signal] aborts an in-flight pull. */
+export async function pullApp(adb: Adb, pkg: string, dir: string, signal?: AbortSignal): Promise<string[]> {
+  const remote = await apkPaths(adb, pkg, signal)
+  if (signal?.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError' })
   if (!remote.length) throw new Error(`${pkg} is not installed on ${adb.serial}`)
   const target = join(dir, pkg)
   rmSync(target, { recursive: true, force: true })
   mkdirSync(target, { recursive: true })
   const local: string[] = []
   for (const [i, path] of remote.entries()) {
+    if (signal?.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError' })
     const file = join(target, `${i}-${path.split('/').pop()}`)
-    await adb.exec(['pull', path, file], 300_000)
+    await adb.exec(['pull', path, file], 300_000, signal)
     local.push(file)
   }
   return local
