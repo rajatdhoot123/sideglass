@@ -30,17 +30,82 @@ export interface HooksEvents {
 const INJECT_TIMEOUT_MS = 20_000
 
 /**
- * Runs frida-server on the capture phone and starts apps through it, so the agent
- * in agent.ts is loaded before the app's first line of code runs. Set up lazily on
- * the first launch; every failure degrades to a normal app launch.
+ * True when the phone pre-forks app processes. Those forks happen before the user
+ * taps an icon, so a later tap never passes through Frida. `device_config get` prints
+ * `null` when the flag has never been set.
+ */
+export function usapRestartNeeded(configValue: string, processNames: readonly string[]): boolean {
+  if (configValue.trim() !== 'false') return true
+  return processNames.some((name) => name === 'usap' || name === 'usap64')
+}
+
+/** `ps -A -o PID,NAME` rows. The header and blank lines are dropped. */
+export function namesFromPs(table: string): string[] {
+  const names: string[] = []
+  for (const line of table.split('\n')) {
+    const parts = line.trim().split(/\s+/)
+    if (parts.length >= 2 && /^\d+$/.test(parts[0])) names.push(parts[1])
+  }
+  return names
+}
+
+export function pidOfName(table: string, name: string): string {
+  for (const line of table.split('\n')) {
+    const parts = line.trim().split(/\s+/)
+    if (parts.length >= 2 && parts[1] === name && /^\d+$/.test(parts[0])) return parts[0]
+  }
+  return ''
+}
+
+/**
+ * Turn off Android's pre-forked app pool and restart zygote when it is still on,
+ * so the next icon tap is a fresh fork Frida can pause. Returns true when zygote
+ * was restarted. The caller reinstalls the system CA afterwards: a new zygote does
+ * not keep the previous one's certificate mount.
+ */
+export async function ensureDirectAppStarts(adb: Adb, log: (line: string) => void): Promise<boolean> {
+  const config = (await adb.su('device_config get runtime_native usap_pool_enabled').catch(() => '')).trim()
+  const before = await adb.su('ps -A -o PID,NAME').catch(() => '')
+  if (!usapRestartNeeded(config, namesFromPs(before))) return false
+  log('Restarting the phone runtime so an app opened from its icon can be hooked...')
+  await adb.su('device_config put runtime_native usap_pool_enabled false')
+  await adb.su('device_config put runtime_native usap_pool_size_max 0')
+  const previous = pidOfName(before, 'zygote64') || pidOfName(before, 'zygote')
+  await adb.su('setprop ctl.restart zygote')
+  await waitForFreshZygote(adb, previous)
+  return true
+}
+
+async function waitForFreshZygote(adb: Adb, previousPid: string): Promise<void> {
+  const deadline = Date.now() + 90_000
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000))
+    const table = await adb.su('ps -A -o PID,NAME').catch(() => '')
+    const pid = pidOfName(table, 'zygote64') || pidOfName(table, 'zygote')
+    const names = namesFromPs(table)
+    const boot = (await adb.shell('getprop sys.boot_completed').catch(() => '')).trim()
+    if (boot === '1' && pid && pid !== previousPid && !names.includes('usap64') && !names.includes('usap')) return
+  }
+  throw new Error('the phone runtime did not come back without its pre-started app pool')
+}
+
+/**
+ * Runs frida-server on the capture phone and loads agent.ts into every new app
+ * process. Icon taps fork zygote, so the agent is attached there, not only when
+ * the launch list spawns one package. Every failure degrades to a normal launch.
  */
 export class Hooks {
   enabled = true
   ready = false
+  /** True once zygote is gated. A normal `am start` is then hooked too. */
+  gating = false
   message = ''
 
   /** System Node. Electron cannot load the frida prebuild (different ABI). */
   private host: HookHost | null = null
+  private arming: Promise<void> | null = null
+  /** Last process each package was hooked in, from the agent's own report. */
+  private readonly hooked = new Map<string, { pid: number; at: number }>()
   private starting = false
   private serverReady = false
 
@@ -63,12 +128,67 @@ export class Hooks {
     this.events.state(this.snapshot())
   }
 
+  /**
+   * Attach to zygote so the next app process, however it is opened, loads the agent.
+   * Safe to call more than once.
+   */
+  arm(): Promise<void> {
+    if (!this.enabled || this.gating) return Promise.resolve()
+    // Overlapping calls would restart frida-server under each other.
+    this.arming ??= this.doArm().finally(() => {
+      this.arming = null
+    })
+    return this.arming
+  }
+
+  /** The pid `pkg` was hooked in at or after `since` (ms), or null. */
+  hookedSince(pkg: string, since: number): number | null {
+    const hit = this.hooked.get(pkg)
+    return hit && hit.at >= since ? hit.pid : null
+  }
+
+  private newHost(): HookHost {
+    return new HookHost(
+      (line) => this.say(line),
+      (pkg, pid) => this.hooked.set(pkg, { pid, at: Date.now() }),
+    )
+  }
+
+  private async doArm(): Promise<void> {
+    await this.ensureServer()
+    // Turned off while frida-server was still starting.
+    if (!this.enabled || this.gating) return
+    const host = this.host
+    if (!host) throw new Error('Hook host did not start')
+    await host.gate(AGENT_SOURCE)
+    if (!this.enabled) {
+      await host.ungate().catch(() => undefined)
+      return
+    }
+    this.gating = true
+    this.message = 'Hooks are on for every app. Tap its icon on the phone. If it is already open, close it once so it starts fresh.'
+    this.say(this.message)
+    this.announce()
+  }
+
+  /** Stop intercepting new processes. Apps already hooked stay hooked until they restart. */
+  async disarm(): Promise<void> {
+    this.gating = false
+    await this.host?.ungate().catch(() => undefined)
+    this.message = 'Hooks are off. Apps open normally.'
+    this.say(this.message)
+    this.announce()
+  }
+
   /** Start `pkg` suspended, inject the agent, then let it run. Returns its pid. */
   async launch(pkg: string): Promise<number> {
+    // Gating already injects on the way out of zygote. A second spawn would load the agent twice
+    // and, on failure, tear down the host that is watching zygote.
+    if (this.gating) throw new Error('App starts are already hooked from the phone')
     await this.ensureServer()
     const adb = this.getAdb()
     await adb.shell(`am force-stop ${pkg}`)
-    const host = this.host ?? (this.host = new HookHost((line) => this.say(line)))
+    const host = this.host ?? (this.host = this.newHost())
     try {
       const pid = await withTimeout(host.spawn(pkg, AGENT_SOURCE), INJECT_TIMEOUT_MS, 'Hook injection')
       return pid
@@ -85,6 +205,7 @@ export class Hooks {
   }
 
   async stop(): Promise<void> {
+    this.gating = false
     await this.host?.stop().catch(() => undefined)
     this.host = null
     this.serverReady = false
@@ -115,7 +236,7 @@ export class Hooks {
         .catch(() => undefined)
       await adb.exec(['forward', `tcp:${SERVER_PORT}`, `tcp:${SERVER_PORT}`])
       await this.waitPort()
-      this.host ??= new HookHost((line) => this.say(line))
+      this.host ??= this.newHost()
       await this.host.ping()
       this.serverReady = true
       this.ready = true
@@ -195,7 +316,10 @@ class HookHost {
   private buffer = ''
   private stderrTail = ''
 
-  constructor(private readonly log: (line: string) => void) {}
+  constructor(
+    private readonly log: (line: string) => void,
+    private readonly onHooked: (pkg: string, pid: number) => void,
+  ) {}
 
   ping(): Promise<void> {
     return this.request({ cmd: 'ping' }, 30_000).then(() => undefined)
@@ -205,6 +329,14 @@ class HookHost {
     const reply = await this.request({ cmd: 'spawn', pkg, source, port: SERVER_PORT }, INJECT_TIMEOUT_MS)
     if (!reply.pid) throw new Error('Frida did not return a process id')
     return reply.pid
+  }
+
+  gate(source: string): Promise<void> {
+    return this.request({ cmd: 'gate', source, port: SERVER_PORT }, 60_000).then(() => undefined)
+  }
+
+  ungate(): Promise<void> {
+    return this.request({ cmd: 'ungate' }, 15_000).then(() => undefined)
   }
 
   async stop(): Promise<void> {
@@ -288,10 +420,16 @@ class HookHost {
       if (!text) continue
       this.stderrTail = `${this.stderrTail}\n${text}`.slice(-2000)
       try {
-        const parsed = JSON.parse(text) as { sg?: string; pkg?: string; message?: { type?: string; payload?: { sg?: string; text?: string }; description?: string } }
+        const parsed = JSON.parse(text) as {
+          sg?: string
+          pkg?: string
+          message?: { type?: string; payload?: { sg?: string; text?: string; pkg?: string; pid?: number }; description?: string }
+        }
         if (parsed.sg === 'script') {
           const msg = parsed.message
-          if (msg?.type === 'send' && msg.payload?.sg === 'log') this.log(`${parsed.pkg}: ${msg.payload.text}`)
+          if (msg?.type === 'send' && msg.payload?.sg === 'hooked' && msg.payload.pkg && msg.payload.pid) {
+            this.onHooked(msg.payload.pkg, msg.payload.pid)
+          } else if (msg?.type === 'send' && msg.payload?.sg === 'log') this.log(`${parsed.pkg}: ${msg.payload.text}`)
           else if (msg?.type === 'error') this.log(`${parsed.pkg}: hook error: ${msg.description ?? 'unknown'}`)
           continue
         }
@@ -311,6 +449,10 @@ class HookHost {
 /** scripts/hooks-host.mjs, next to the app when running from a checkout. */
 function hostScript(): string {
   const candidates = [join(process.cwd(), 'scripts', 'hooks-host.mjs'), join(__dirname, '../../scripts/hooks-host.mjs')]
+  if (process.resourcesPath) {
+    candidates.push(join(process.resourcesPath, 'sideglass', 'hooks-host.mjs'))
+    candidates.push(join(process.resourcesPath, 'scripts', 'hooks-host.mjs'))
+  }
   const found = candidates.find((path) => existsSync(path))
   if (!found) throw new Error('Launch hooks host is missing (scripts/hooks-host.mjs)')
   return found

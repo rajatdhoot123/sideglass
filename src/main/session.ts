@@ -31,7 +31,7 @@ import { packageFromPlayLink, PlayHelper } from './store/play'
 import { usbPhones, userApps } from './store/usb'
 import { Adb } from './adb'
 import { Attributor } from './attrib'
-import { Hooks, type HooksSnapshot } from './hooks'
+import { ensureDirectAppStarts, Hooks, type HooksSnapshot } from './hooks'
 import { Timeline } from './timeline'
 import { Logcat, type LogLine } from './logcat'
 import { classifyRefusal, type Refusal } from './refusal'
@@ -132,6 +132,7 @@ export class Session extends EventEmitter {
       this.attrib.start()
       this.log('Requests are tagged with the app that opened the socket.')
     }
+    if (this.mode === 'virtual' && this.hooksEnabled) await this.armIconHooks(adb)
     await this.attachScreen(adb)
     await this.startFrida(adb)
     this.logcat = new Logcat(adb)
@@ -416,7 +417,31 @@ export class Session extends EventEmitter {
     // Hooks need root. A USB phone, and any other emulator treated as one, stays on a normal launch.
     if (this.hooksEnabled && this.mode === 'virtual') {
       try {
-        const pid = await this.getHooks().launch(pkg)
+        const hooks = this.getHooks()
+        // The same path as the Hooks switch: one arm at a time, and the app pool is cleared first.
+        if (!hooks.gating && (await this.armIconHooks(adb))) await this.attachScreen(adb)
+        if (hooks.gating) {
+          // Zygote loads the agent into the new process. Spawning again would inject it twice.
+          await adb.shell(`am force-stop ${pkg}`)
+          const since = Date.now()
+          await adb.shell(`am start -n '${component}'`)
+          const deadline = since + 10_000
+          let hookedPid: number | null = null
+          while (Date.now() < deadline) {
+            hookedPid = hooks.hookedSince(pkg, since)
+            if (hookedPid) break
+            await new Promise((r) => setTimeout(r, 250))
+          }
+          const pid = hookedPid ?? (await this.pidOf(pkg))
+          if (pid) this.watch(pkg, pid)
+          if (!hookedPid) {
+            const note = `${pkg} started, but its hooks did not load.`
+            this.emit('hooks-log', note)
+            message = message ? `${message} ${note}` : note
+          }
+          return { device: 'capture', pid, hooked: Boolean(hookedPid), message }
+        }
+        const pid = await hooks.launch(pkg)
         this.watch(pkg, pid)
         return { device: 'capture', pid, hooked: true, message }
       } catch (error) {
@@ -469,10 +494,54 @@ export class Session extends EventEmitter {
   setHooksEnabled(on: boolean): HooksSnapshot {
     this.hooksEnabled = on
     // Snapshot reads Hooks.enabled. Update it first, or the switch sticks on the old value.
-    if (this.hooks) this.hooks.enabled = on
+    if (this.mode === 'virtual') {
+      const hooks = this.getHooks()
+      hooks.enabled = on
+      if (on && this.device) {
+        void this.armIconHooks(this.device).then((restarted) => {
+          if (restarted && this.device) void this.attachScreen(this.device)
+        })
+      } else {
+        void hooks.disarm()
+      }
+    } else if (this.hooks) {
+      this.hooks.enabled = on
+    }
     const snapshot = this.hooksState()
     this.emit('hooks-state', snapshot)
     return snapshot
+  }
+
+  private hooksArm: Promise<boolean> | null = null
+
+  /**
+   * Make an icon tap fork a new process, then arm zygote gating. A restarted
+   * zygote loses the CA mount, so trust is installed again. Returns whether
+   * the runtime was restarted (the screen mirror has to be opened again).
+   */
+  private armIconHooks(adb: Adb): Promise<boolean> {
+    this.hooksArm ??= this.doArmIconHooks(adb).finally(() => {
+      this.hooksArm = null
+    })
+    return this.hooksArm
+  }
+
+  private async doArmIconHooks(adb: Adb): Promise<boolean> {
+    let restarted = false
+    try {
+      restarted = await ensureDirectAppStarts(adb, (line) => {
+        // Set before the restart finishes, so a failure halfway still reinstalls the CA.
+        restarted = true
+        this.log(line)
+      })
+      if (restarted && this.ca) await this.trust(adb, this.ca)
+      await this.getHooks().arm()
+      return restarted
+    } catch (error) {
+      if (restarted && this.ca) await this.trust(adb, this.ca).catch(() => undefined)
+      this.log(`Opening an app from its icon will not inject hooks (${(error as Error).message}). The launch list still tries.`)
+      return restarted
+    }
   }
 
   hooksState(): HooksSnapshot {

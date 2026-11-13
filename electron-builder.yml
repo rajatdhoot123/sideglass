@@ -9,6 +9,8 @@ files:
 extraResources:
   - from: scripts/frida-host.mjs
     to: sideglass/frida-host.mjs
+  - from: scripts/hooks-host.mjs
+    to: sideglass/hooks-host.mjs
   - from: scripts/frida-agent
     to: sideglass/frida-agent
 asarUnpack:
