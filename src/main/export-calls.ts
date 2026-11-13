@@ -1,4 +1,4 @@
-import { joinHeader, REPLAY_SKIP, toCurl } from './curl'
+import { curlStdin, isHeaderName, joinHeader, oneLine, REPLAY_SKIP, toCurl } from './curl'
 import { toHar } from './har'
 import type { Exchange } from './proxy'
 
@@ -98,18 +98,33 @@ interface ReplayBody {
   left?: string
 }
 
+const PROTOBUF_LEFT = 'Body left out: it is binary protobuf, which this format cannot hold. Save as cURL to send it.'
+
 function replayBody(exchange: Exchange): ReplayBody {
   const body = exchange.requestBody
   if (!body || exchange.method === 'GET' || exchange.method === 'HEAD') return {}
-  if (/^<\d+ bytes, too large to show>$/.test(body) || /^<binary, \d+ bytes>$/.test(body)) {
-    return { left: 'Body left out: Sideglass did not keep it as text.' }
+  const protobuf = isProtobuf(exchange)
+  const placeholder = /^<\d+ bytes, too large to show>$/.test(body) || /^<binary, \d+ bytes>$/.test(body)
+  // A failed decode still stores the raw buffer. The placeholder is only the text view.
+  if (placeholder && protobuf && exchange.requestBytes) {
+    return { bytes: exchange.requestBytes, left: PROTOBUF_LEFT }
   }
-  const type = requestHeader(exchange, 'content-type').toLowerCase()
-  if (type.includes('grpc') || type.includes('protobuf')) {
-    const left = 'Body left out: it is binary protobuf, which this format cannot hold. Save as cURL to send it.'
-    return exchange.requestBytes ? { bytes: exchange.requestBytes, left } : { left: 'Body left out: it is binary protobuf and the raw bytes were not kept.' }
+  if (placeholder) {
+    return {
+      left: protobuf
+        ? 'Body left out: it is binary protobuf and the raw bytes were not kept.'
+        : 'Body left out: Sideglass did not keep it as text.',
+    }
+  }
+  if (protobuf) {
+    return exchange.requestBytes ? { bytes: exchange.requestBytes, left: PROTOBUF_LEFT } : { left: 'Body left out: it is binary protobuf and the raw bytes were not kept.' }
   }
   return { text: body }
+}
+
+function isProtobuf(exchange: Exchange): boolean {
+  const type = requestHeader(exchange, 'content-type').toLowerCase()
+  return type.includes('grpc') || type.includes('protobuf')
 }
 
 function requestHeader(exchange: Exchange, name: string): string {
@@ -125,13 +140,13 @@ function note(exchange: Exchange): string {
   else if (exchange.status !== undefined) bits.push(`${exchange.status}${exchange.statusMessage ? ` ${exchange.statusMessage}` : ''}`)
   if (exchange.durationMs !== undefined) bits.push(`${exchange.durationMs} ms`)
   if (exchange.app) bits.push(exchange.app)
-  return bits.join(' · ')
+  return oneLine(bits.join(' · '))
 }
 
 function itemName(exchange: Exchange): string {
   const path = exchange.path.split(/[?#]/)[0] || '/'
   const host = exchange.host.replace(/:\d+$/, '')
-  const name = `${exchange.method} ${host}${path}`
+  const name = oneLine(`${exchange.method} ${host}${path}`)
   return name.length > 140 ? `${name.slice(0, 139)}…` : name
 }
 
@@ -140,10 +155,10 @@ function headerList(
   replay: boolean,
 ): { key: string; value: string }[] {
   const out: { key: string; value: string }[] = []
-  // A newline in a header would become a second header when the file is read back.
-  const clean = (text: string) => text.replace(/[\r\n]+/g, ' ')
+  // A control character in a value would become a second header when the file is read back.
+  const clean = (text: string) => oneLine(text)
   for (const [name, value] of Object.entries(headers ?? {})) {
-    if (value === undefined || name.startsWith(':')) continue
+    if (value === undefined || !isHeaderName(name)) continue
     if (replay && REPLAY_SKIP.has(name.toLowerCase())) continue
     const items = Array.isArray(value) ? value : [value]
     // A request sends repeated headers as one line. Cookies split over HTTP/2 frames join with `; `.
@@ -171,7 +186,7 @@ function postmanRequest(exchange: Exchange): Record<string, unknown> {
   const header = headerList(exchange.requestHeaders, true)
   const body = replayBody(exchange)
   const contentType = header.find((item) => item.key.toLowerCase() === 'content-type')?.value
-  const request: Record<string, unknown> = { method: exchange.method, header, url: exchange.url }
+  const request: Record<string, unknown> = { method: oneLine(exchange.method), header, url: oneLine(exchange.url) }
   const about = [note(exchange), body.left].filter(Boolean).join('\n\n')
   if (about) request.description = about
   if (body.text !== undefined) {
@@ -201,25 +216,50 @@ function toPostman(exchanges: Exchange[]): object {
               body: exchange.responseBody ?? '',
             }
           : undefined
-      return { name: itemName(exchange), request, ...(saved ? { response: [saved] } : {}) }
+      const header = request.header as { value: string }[]
+      const raw = (request.body as { raw?: unknown } | undefined)?.raw
+      const texts = [String(request.url), ...header.map((item) => item.value), ...(typeof raw === 'string' ? [raw] : [])]
+      const exec = literalBraces(texts)
+      return {
+        name: itemName(exchange),
+        ...(exec ? { event: [{ listen: 'prerequest', script: { type: 'text/javascript', exec } }] } : {}),
+        request,
+        ...(saved ? { response: [saved] } : {}),
+      }
     }),
   }
+}
+
+/**
+ * Postman replaces `{{name}}` before sending, including `$guid` and any workspace variable.
+ * A local variable set to that same text wins, and the script never writes the brace pair or Postman would replace it too.
+ */
+function literalBraces(texts: string[]): string[] | undefined {
+  const tokens = new Set<string>()
+  for (const text of texts) {
+    for (const match of text.matchAll(/\{\{([^{}]*)\}\}/g)) tokens.add(match[1])
+  }
+  if (tokens.size === 0) return undefined
+  const lines = ['// Keep captured braces literal. A local variable outranks a workspace or dynamic one.']
+  for (const token of tokens) {
+    lines.push(`pm.variables.set(${JSON.stringify(token)}, "{" + "{" + ${JSON.stringify(token)} + "}" + "}");`)
+  }
+  return lines
 }
 
 function toCurlScript(exchanges: Exchange[]): string {
   const lines = ['#!/bin/sh', `# Sideglass — ${exchanges.length} request${exchanges.length === 1 ? '' : 's'}`, '']
   for (const exchange of exchanges) {
     const about = note(exchange)
-    lines.push(`# ${exchange.method} ${exchange.url}${about ? ` — ${about}` : ''}`)
+    lines.push(`# ${oneLine(exchange.method)} ${oneLine(exchange.url)}${about ? ` — ${about}` : ''}`)
     const requestHeaders: Record<string, string> = {}
     for (const header of headerList(exchange.requestHeaders, true)) requestHeaders[header.key] = header.value
     const body = replayBody(exchange)
-    const command = toCurl({ method: exchange.method, url: exchange.url, requestHeaders, requestBody: body.text })
-    if (body.bytes) {
-      // Raw protobuf bytes cannot sit in a shell string, so the script decodes them and pipes them in.
-      lines.push(`printf '%s' '${body.bytes.toString('base64')}' | base64 --decode | ${command} --data-binary @-`)
+    const command = toCurl({ method: exchange.method, url: exchange.url, requestHeaders })
+    if (body.bytes || body.text !== undefined) {
+      lines.push(curlStdin(command, body.bytes ?? Buffer.from(body.text ?? '')))
     } else {
-      if (body.left) lines.push(`# ${body.left}`)
+      if (body.left) lines.push(`# ${oneLine(body.left)}`)
       lines.push(command)
     }
     lines.push('')
@@ -237,7 +277,7 @@ function toHttpFile(exchanges: Exchange[]): string {
     // This format has no escape: a `###` line starts the next request, and `{{name}}` is a variable.
     const left = body.text !== undefined && /^###|\{\{/m.test(body.text) ? 'Body left out: it contains ### or {{, which this format reads as syntax. Save as cURL or Postman to keep it.' : body.left
     if (left) lines.push(`# ${left}`)
-    lines.push(`${exchange.method} ${exchange.url}`)
+    lines.push(`${oneLine(exchange.method)} ${oneLine(exchange.url)}`)
     for (const header of headerList(exchange.requestHeaders, true)) lines.push(`${header.key}: ${header.value}`)
     if (body.text !== undefined && !left) {
       lines.push('')

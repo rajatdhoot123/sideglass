@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { callFileName, fileNames, parseSaveRequest, renderCalls, unusedName } from './export-calls'
 import type { Exchange } from './proxy'
@@ -70,7 +74,8 @@ test('a placeholder body is left out of replay files and a real body is kept', (
   const script = renderCalls([exchange(), binary], 'curl')
   assert.match(script, /^#!\/bin\/sh/)
   assert.equal((script.match(/curl -X/g) ?? []).length, 2)
-  assert.match(script, /--data-binary '\{"n":1\}'/)
+  assert.match(script, /base64 --decode <<'SIDEGLASS' \| curl .* --data-binary @-\neyJuIjoxfQ==\nSIDEGLASS/)
+  assert.doesNotMatch(script, /--data-raw/)
   assert.doesNotMatch(script, /binary, 40 bytes/)
   assert.match(script, /X-Bad: a X-Injected: yes/)
   assert.doesNotMatch(script, /X-Bad: a\n/)
@@ -102,7 +107,7 @@ test('protobuf goes in the cURL script as raw bytes and stays out of text format
     requestBytes: Buffer.from([0x0a, 0x03, 0x61, 0x62, 0x63, 0x10, 0x05]),
   })
   const script = renderCalls([proto], 'curl')
-  assert.match(script, /printf '%s' 'CgNhYmMQBQ==' \| base64 --decode \| curl .* --data-binary @-$/m)
+  assert.match(script, /base64 --decode <<'SIDEGLASS' \| curl .* --data-binary @-\nCgNhYmMQBQ==\nSIDEGLASS/)
   assert.doesNotMatch(script, /1: "abc"/)
   assert.doesNotMatch(renderCalls([proto], 'http'), /1: "abc"/)
   const collection = JSON.parse(renderCalls([proto], 'postman')) as { item: { request: { body?: unknown; description: string } }[] }
@@ -134,4 +139,104 @@ test('the .http file leaves out a body it would misread, and GET bodies are left
   assert.equal(collection.item[0].request.body, undefined)
   assert.doesNotMatch(renderCalls([get], 'http'), /\{"n":1\}/)
   assert.doesNotMatch(renderCalls([get], 'curl'), /--data-binary/)
+})
+
+test('undecoded protobuf bytes are still sent by the cURL script', () => {
+  const raw = Buffer.from([0x0a, 0x03, 0x61, 0x62, 0x63])
+  const proto = exchange({
+    requestHeaders: { 'content-type': 'application/grpc' },
+    requestBody: '<binary, 5 bytes>',
+    requestBytes: raw,
+  })
+  const script = renderCalls([proto], 'curl')
+  assert.match(script, /CgNhYmM=/)
+  assert.doesNotMatch(script, /binary, 5 bytes/)
+  const http = renderCalls([proto], 'http')
+  assert.match(http, /binary protobuf/)
+  assert.doesNotMatch(http, /CgNhYmM=/)
+  const lost = exchange({ requestHeaders: { 'content-type': 'application/grpc' }, requestBody: '<binary, 5 bytes>' })
+  assert.match(renderCalls([lost], 'curl'), /raw bytes were not kept/)
+  assert.doesNotMatch(renderCalls([lost], 'curl'), /--data-binary/)
+})
+
+test('the cURL script sends the captured body and does not read a file or start a new command', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sideglass-curl-'))
+  try {
+    const out = join(dir, 'body')
+    const pwned = join(dir, 'pwned')
+    const curlBin = join(dir, 'curl')
+    writeFileSync(curlBin, `#!/bin/sh\ncat > ${JSON.stringify(out)}\n`)
+    chmodSync(curlBin, 0o755)
+    const body = "@/etc/hosts\na'b"
+    const script = renderCalls(
+      [
+        exchange({
+          url: `https://example.com/\ntouch ${pwned}`,
+          statusMessage: `OK\ntouch ${pwned}`,
+          app: `com.app\ntouch ${pwned}`,
+          requestHeaders: { 'content-type': 'text/plain', 'X-Bad\nX-Evil': '1', 'X-Ok': 'v' },
+          requestBody: body,
+        }),
+      ],
+      'curl',
+    )
+    assert.doesNotMatch(script, /^touch /m)
+    assert.doesNotMatch(script, /^X-Evil:/m)
+    const http = renderCalls(
+      [exchange({ url: `https://example.com/\ntouch ${pwned}`, requestHeaders: { 'X-Bad\nX-Evil': '1', 'X-Ok': 'v' }, requestBody: 'hi' })],
+      'http',
+    )
+    assert.doesNotMatch(http, /^touch /m)
+    assert.match(http, /^X-Ok: v$/m)
+    assert.doesNotMatch(http, /X-Evil/)
+    const file = join(dir, 'run.sh')
+    writeFileSync(file, script)
+    const result = spawnSync('sh', [file], { env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ''}` }, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(readFileSync(out, 'utf8'), body)
+    assert.equal(existsSync(pwned), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a large body stays off the curl command line', () => {
+  const big = 'x'.repeat(200_000)
+  const script = renderCalls([exchange({ requestBody: big })], 'curl')
+  const command = script.split('\n').find((line) => line.startsWith('base64 '))
+  assert.ok(command)
+  assert.equal(command.includes(big), false)
+  assert.match(command, /--data-binary @-/)
+})
+
+test('Postman keeps literal brace names that it would otherwise replace', () => {
+  const body = '{"id":"{{$guid}}","user":"{{username}}"}'
+  const collection = JSON.parse(renderCalls([exchange({ requestBody: body, url: 'https://example.com/{{$timestamp}}' })], 'postman')) as {
+    item: { event?: { script: { exec: string[] } }[]; request: { url: string; body: { raw: string } } }[]
+  }
+  const item = collection.item[0]
+  assert.equal(item.request.body.raw, body)
+  assert.equal(item.request.url, 'https://example.com/{{$timestamp}}')
+  const exec = item.event?.[0].script.exec ?? []
+  assert.equal(exec.some((line) => line.includes('{{')), false)
+  const locals: Record<string, string> = { $guid: 'GUID', username: 'secret', $timestamp: 'TIME' }
+  const pm = { variables: { set: (key: string, value: string) => { locals[key] = value } } }
+  for (const line of exec) new Function('pm', line)(pm)
+  const dynamic: Record<string, string> = { $guid: 'GUID', $timestamp: 'TIME' }
+  const resolve = (raw: string) => {
+    let value = raw
+    for (let i = 0; i < 19; i++) {
+      let replacements = 0
+      value = value.replace(/\{\{([^{}]*?)\}\}/g, (match, token) => {
+        replacements += 1
+        if (Object.prototype.hasOwnProperty.call(locals, token)) return locals[token]
+        if (Object.prototype.hasOwnProperty.call(dynamic, token)) return dynamic[token]
+        return match
+      })
+      if (!replacements) break
+    }
+    return value
+  }
+  assert.equal(resolve(item.request.body.raw), body)
+  assert.equal(resolve(item.request.url), 'https://example.com/{{$timestamp}}')
 })
