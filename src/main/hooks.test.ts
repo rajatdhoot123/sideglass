@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { AGENT_SOURCE } from './agent'
-import { namesFromPs, pidOfName, processStopped, runtimeSettled, usapRestartNeeded } from './hooks'
+import { namesFromPs, pidOfName, processStopped, runtimeSettled, usapRestartNeeded, zygoteSample } from './hooks'
 
-test('a restarted runtime counts as ready only once the user is unlocked and System UI runs', () => {
+test('a restarted runtime is ready once System UI is up, including on the lock screen', () => {
   const ps = 'PID NAME\n200 zygote64\n300 system_server\n400 com.android.systemui\n'
   assert.equal(runtimeSettled('    State: RUNNING_UNLOCKED\n', ps), true)
+  assert.equal(runtimeSettled('    State: RUNNING_LOCKED\n', ps), true)
+  assert.equal(runtimeSettled('    State: RUNNING_UNLOCKING\n', ps), true)
   assert.equal(runtimeSettled('    State: BOOTING\n', ps), false)
+  assert.equal(runtimeSettled('    State: STOPPING\n', ps), false)
   assert.equal(runtimeSettled('    State: RUNNING_UNLOCKED\n', 'PID NAME\n200 zygote64\n'), false)
   assert.equal(runtimeSettled('', ps), false)
 })
@@ -16,6 +19,15 @@ test('a zygote held by a tracer is reported as stopped', () => {
   assert.equal(processStopped('Name:\tzygote64\nState:\tT (stopped)\n'), true)
   assert.equal(processStopped('Name:\tzygote64\nState:\tS (sleeping)\n'), false)
   assert.equal(processStopped(''), false)
+})
+
+test('an unreadable zygote status is not treated as a running process', () => {
+  assert.equal(zygoteSample('Name:\tzygote64\nState:\tS (sleeping)\n'), 'running')
+  assert.equal(zygoteSample('Name:\tzygote64\nState:\tR (running)\n'), 'running')
+  assert.equal(zygoteSample('Name:\tzygote64\nState:\tt (tracing stop)\nTracerPid:\t3424\n'), 'stopped')
+  assert.equal(zygoteSample('Name:\tzygote64\nState:\tT (stopped)\n'), 'stopped')
+  assert.equal(zygoteSample(''), 'unreadable')
+  assert.equal(zygoteSample('cat: /proc//status: No such file'), 'unreadable')
 })
 
 test('a pre-forked app pool has to be cleared before icon taps can be hooked', () => {
