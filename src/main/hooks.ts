@@ -76,17 +76,67 @@ export async function ensureDirectAppStarts(adb: Adb, log: (line: string) => voi
   return true
 }
 
+/**
+ * True once user 0 is past boot and System UI is running.
+ * `sys.boot_completed` stays 1 across a zygote restart, so it reads ready while
+ * system_server is still starting. A lock screen is RUNNING_LOCKED, which is past
+ * that window. The mirror is reattached only after this returns, so waiting for
+ * an unlock here would sit out the whole deadline with no way to dismiss the keyguard.
+ */
+export function runtimeSettled(userDump: string, table: string): boolean {
+  const state = /State:\s*(\S+)/.exec(userDump)?.[1] ?? ''
+  const started = state === 'RUNNING_UNLOCKED' || state === 'RUNNING_LOCKED' || state === 'RUNNING_UNLOCKING'
+  return started && namesFromPs(table).includes('com.android.systemui')
+}
+
+/** First letter of the kernel run state in `/proc/<pid>/status`, or '' when the line is missing. */
+function processRunState(status: string): string {
+  return /^State:\s*(\S)/m.exec(status)?.[1] ?? ''
+}
+
+/** Kernel run state from `/proc/<pid>/status`: `T`/`t` mean stopped or held by a tracer. */
+export function processStopped(status: string): boolean {
+  const state = processRunState(status)
+  return state === 'T' || state === 't'
+}
+
+/**
+ * One zygote status read. A missing `State:` line is unreadable, not a running
+ * process: `pidof` or `su` failing would otherwise look like a healthy zygote.
+ */
+export function zygoteSample(status: string): 'running' | 'stopped' | 'unreadable' {
+  const state = processRunState(status)
+  if (state === 'T' || state === 't') return 'stopped'
+  if (!state) return 'unreadable'
+  return 'running'
+}
+
 async function waitForFreshZygote(adb: Adb, previousPid: string): Promise<void> {
-  const deadline = Date.now() + 90_000
+  const deadline = Date.now() + 120_000
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 1000))
     const table = await adb.su('ps -A -o PID,NAME').catch(() => '')
     const pid = pidOfName(table, 'zygote64') || pidOfName(table, 'zygote')
     const names = namesFromPs(table)
-    const boot = (await adb.shell('getprop sys.boot_completed').catch(() => '')).trim()
-    if (boot === '1' && pid && pid !== previousPid && !names.includes('usap64') && !names.includes('usap')) return
+    if (!pid || pid === previousPid || names.includes('usap64') || names.includes('usap')) continue
+    const users = await adb.shell('dumpsys user 2>/dev/null | grep -m1 "State:"').catch(() => '')
+    if (runtimeSettled(users, table)) return
   }
   throw new Error('the phone runtime did not come back without its pre-started app pool')
+}
+
+function zygoteStatus(adb: Adb): Promise<string> {
+  return adb.su('cat /proc/$(pidof zygote64 || pidof zygote)/status 2>/dev/null').catch(() => '')
+}
+
+/** Read zygote's run state a few times. A healthy zygote sleeps; a stuck injection leaves it stopped. */
+async function zygoteStuck(adb: Adb): Promise<boolean> {
+  for (let i = 0; i < 3; i++) {
+    await new Promise((r) => setTimeout(r, 1000))
+    // Keep going when the read fails. One empty sample is not a running zygote.
+    if (zygoteSample(await zygoteStatus(adb)) === 'running') return false
+  }
+  return true
 }
 
 /**
@@ -165,15 +215,79 @@ export class Hooks {
       await host.ungate().catch(() => undefined)
       return
     }
-    this.gating = true
-    this.message = 'Hooks are on for every app. Tap its icon on the phone. If it is already open, close it once so it starts fresh.'
+    // Every app on the phone forks from zygote. If the attach left it stopped, nothing can
+    // open and the screen stays black, so back out rather than report hooks as on.
+    const adb = this.getAdb()
+    const stuck = await zygoteStuck(adb)
+    // Turned off during the status wait. Do not gate afterwards, and do not report a failure
+    // for a switch the user already turned off. A zygote that is still traced still has to
+    // be released, or the phone stays on a black screen.
+    if (!this.enabled) {
+      await this.cancelArm(host, adb, stuck)
+      return
+    }
+    if (!stuck) {
+      this.gating = true
+      this.message = 'Hooks are on for every app. Tap its icon on the phone. If it is already open, close it once so it starts fresh.'
+      this.say(this.message)
+      this.announce()
+      return
+    }
+    await host.ungate().catch(() => undefined)
+    const still = await zygoteStuck(adb)
+    if (!this.enabled) {
+      await this.cancelArm(host, adb, still)
+      return
+    }
+    if (still) {
+      // stop() clears the message and leaves `enabled` as it was. Turn the switch off first,
+      // then say whether the phone actually recovered.
+      this.enabled = false
+      await this.stop()
+      await adb.su('kill $(pidof .sgsys) 2>/dev/null; true').catch(() => undefined)
+      const sample = zygoteSample(await zygoteStatus(adb))
+      this.failArm(
+        sample === 'running'
+          ? 'Hooks were switched off because attaching froze the phone. Turn them on to try again.'
+          : 'Hooks were switched off because attaching froze the phone, and the runtime is still stopped.',
+      )
+    }
+    this.failArm('Hooks were switched off because attaching froze the phone. Turn them on to try again.')
+  }
+
+  /** Hooks were turned off mid-arm. Release a traced zygote without logging an arming failure. */
+  private async cancelArm(host: HookHost, adb: Adb, stuck: boolean): Promise<void> {
+    await host.ungate().catch(() => undefined)
+    if (!stuck) return
+    await this.stop()
+    await adb.su('kill $(pidof .sgsys) 2>/dev/null; true').catch(() => undefined)
+    const running = zygoteSample(await zygoteStatus(adb)) === 'running'
+    this.message = running
+      ? 'Hooks are off. Apps open normally.'
+      : 'Hooks are off. The phone runtime is still stopped.'
     this.say(this.message)
     this.announce()
+  }
+
+  /** Arming failed. `stop()` may already have wiped `message`; set it again and surface it. */
+  private failArm(message: string): never {
+    this.enabled = false
+    this.gating = false
+    this.message = message
+    this.say(message)
+    this.announce()
+    throw new Error(message)
   }
 
   /** Stop intercepting new processes. Apps already hooked stay hooked until they restart. */
   async disarm(): Promise<void> {
     this.gating = false
+    if (this.arming) {
+      await this.arming.catch(() => undefined)
+      // doArm saw the switch go off. It already ungated and, when zygote was still
+      // traced, reported whether the phone recovered. Don't replace that.
+      if (!this.enabled && this.message) return
+    }
     await this.host?.ungate().catch(() => undefined)
     this.message = 'Hooks are off. Apps open normally.'
     this.say(this.message)
@@ -342,7 +456,12 @@ class HookHost {
   async stop(): Promise<void> {
     if (!this.child) return
     await this.request({ cmd: 'stop' }, 5_000).catch(() => undefined)
-    this.child.kill()
+    const child = this.child
+    child.kill()
+    // A host stuck inside a native frida call can outlive SIGTERM; never leave one behind.
+    setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    }, 3_000).unref()
     this.child = null
     for (const waiter of this.pending.values()) waiter.reject(new Error('Hook host stopped'))
     this.pending.clear()
