@@ -4,6 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { generateSPKIFingerprint } from 'mockttp'
 import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
+import { CAPTURE_PIN, LockKeeper } from './lock'
 import { CAPTURE_PHONE, ensureAvd, IMAGE_ABI, ramdiskOf, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
 import { DeviceFrida } from './frida'
 import { fromHar } from './har'
@@ -54,6 +55,7 @@ export class Session extends EventEmitter {
   readonly proxy = new CaptureProxy()
   readonly timeline = new Timeline()
   private attrib: Attributor | null = null
+  private lock: LockKeeper | null = null
   sdk: Sdk | null = null
   ca: CaFiles | null = null
   emulator: RunningEmulator | null = null
@@ -132,6 +134,8 @@ export class Session extends EventEmitter {
       this.proxy.lookupApp = (host, port) => this.attrib!.lookup(host, port)
       this.attrib.start()
       this.log('Requests are tagged with the app that opened the socket.')
+      this.lock = new LockKeeper(adb, CAPTURE_PIN, this.log)
+      await this.lock.start()
     }
     if (this.mode === 'virtual' && this.hooksEnabled) await this.armIconHooks(adb)
     await this.attachScreen(adb)
@@ -693,6 +697,8 @@ export class Session extends EventEmitter {
     this.history = null
     this.attrib?.stop()
     this.attrib = null
+    this.lock?.stop()
+    this.lock = null
     this.screen?.stop()
     this.logcat?.stop()
     await this.hooks?.stop().catch(() => undefined)
