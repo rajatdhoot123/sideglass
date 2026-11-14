@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /** Pinned to the exact `frida` npm version in package.json: client and server must match. */
@@ -75,28 +75,40 @@ export function decompressXz(bytes: Buffer): Promise<Buffer> {
 }
 
 /**
- * The frida-server binary for `arch`, downloaded once into `cacheDir`. The download must match
- * the pinned digest before it is unpacked; the unpacked copy is reused on later runs.
+ * The frida-server binary for `arch`. The official `.xz` is downloaded once into `cacheDir`, and
+ * on every call (a cache hit too) it must match the pinned digest before it is unpacked, so the
+ * file pushed to the phone and started as root always comes from bytes that were checked this run.
+ * A cached `.xz` that fails the check is deleted and downloaded again.
  */
 export async function fridaServerBinary(
   cacheDir: string,
   arch: string,
   log: (line: string) => void = () => undefined,
 ): Promise<string> {
-  const path = join(cacheDir, serverAsset(arch))
-  if (existsSync(path)) return path
   if (!SERVER_XZ_SHA256[arch]) throw new Error(`No pinned frida-server build for ${arch}`)
   await mkdir(cacheDir, { recursive: true })
-  log(`Downloading frida-server ${FRIDA_VERSION} (${arch})...`)
-  const response = await fetch(serverUrl(arch), { signal: AbortSignal.timeout(300_000), headers: { 'user-agent': 'sideglass' } })
-  if (!response.ok) throw new Error(`frida-server download failed: HTTP ${response.status}`)
-  const compressed = Buffer.from(await response.arrayBuffer())
-  if (!isXz(compressed) || !trustedServerXz(arch, compressed)) {
-    throw new Error(`frida-server ${FRIDA_VERSION} download did not match the published SHA-256`)
+  const path = join(cacheDir, serverAsset(arch))
+  const xzPath = `${path}.xz`
+  let compressed = existsSync(xzPath) ? await readFile(xzPath).catch(() => null) : null
+  if (compressed && !(isXz(compressed) && trustedServerXz(arch, compressed))) {
+    log('The cached frida-server did not match its published SHA-256; downloading it again.')
+    await rm(xzPath, { force: true })
+    compressed = null
+  }
+  if (!compressed) {
+    log(`Downloading frida-server ${FRIDA_VERSION} (${arch})...`)
+    const response = await fetch(serverUrl(arch), { signal: AbortSignal.timeout(300_000), headers: { 'user-agent': 'sideglass' } })
+    if (!response.ok) throw new Error(`frida-server download failed: HTTP ${response.status}`)
+    compressed = Buffer.from(await response.arrayBuffer())
+    if (!isXz(compressed) || !trustedServerXz(arch, compressed)) {
+      throw new Error(`frida-server ${FRIDA_VERSION} download did not match the published SHA-256`)
+    }
+    await writeFile(`${xzPath}.part`, compressed)
+    await rename(`${xzPath}.part`, xzPath)
   }
   const binary = await decompressXz(compressed)
   if (!isElf(binary)) throw new Error('frida-server did not unpack to an ELF binary')
-  // Written last and in one go, so a half-finished download is never mistaken for the binary.
+  // Written last and in one go, so a half-written file is never pushed.
   await writeFile(`${path}.part`, binary, { mode: 0o755 })
   await rename(`${path}.part`, path)
   return path

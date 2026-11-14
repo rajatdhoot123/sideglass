@@ -18,6 +18,18 @@ export function isPin(value: string): boolean {
   return /^[0-9]{4,16}$/.test(value)
 }
 
+/**
+ * What `locksettings verify` said: the PIN matched, the PIN was refused, or nothing usable
+ * (no output, a timeout, the lock settings service still starting).
+ */
+export function verifyResult(output: string | null): 'verified' | 'rejected' | 'unknown' {
+  if (!output) return 'unknown'
+  if (/verified successfully/i.test(output)) return 'verified'
+  // LockSettingsShellCommand prints "Old password '…' didn't match" for a wrong credential.
+  if (/didn'?t match|does not match/i.test(output)) return 'rejected'
+  return 'unknown'
+}
+
 async function keyguardShowing(adb: Adb): Promise<boolean | null> {
   const policy = await adb.shell('dumpsys window policy', 10_000).catch(() => '')
   return keyguardShowingFrom(policy)
@@ -63,8 +75,15 @@ export class LockKeeper {
       // (five of those start Android's lockout). This also unlocks the user's storage after a
       // boot, which apps and the package manager need before anything can launch.
       if (!this.verified) {
-        const verify = await this.adb.shell(`locksettings verify --old ${this.pin}`, 10_000).catch(() => '')
-        if (!/verified successfully/i.test(verify)) {
+        // A refused PIN exits non-zero, so read what it printed from the error too.
+        const verify = await this.adb
+          .shell(`locksettings verify --old ${this.pin}`, 10_000)
+          .catch((error: { stdout?: unknown }) => (typeof error?.stdout === 'string' ? error.stdout : null))
+        const result = verifyResult(verify)
+        // Empty output, a timeout or a failed command means the lock service is not up yet
+        // (right after a runtime restart). Try again on the next pass.
+        if (result === 'unknown') return false
+        if (result === 'rejected') {
           this.gaveUp = true
           this.log(
             'The phone is locked and its PIN is not the one Sideglass set. Type the PIN on the phone screen: ' +
@@ -73,6 +92,8 @@ export class LockKeeper {
           return false
         }
         this.verified = true
+        // Verifying can unlock the phone by itself; never type the PIN into whatever is in front.
+        if ((await keyguardShowing(this.adb)) !== true) return true
       }
       // Wake, swipe up to raise the PIN pad, type the PIN. Too early after a boot the swipe
       // does nothing; the next check tries again.

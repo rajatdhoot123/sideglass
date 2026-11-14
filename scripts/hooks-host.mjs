@@ -283,13 +283,23 @@ async function startGate(message) {
   }
   const current = { signal, onChild, sessions: attached }
   gating = current
-  // zygote dies with system_server. The gate is then useless: drop it so the next request attaches again.
+  // zygote dies with system_server. When any watched zygote goes, drop the whole gate: the
+  // other session would keep holding new forks paused with nothing left to resume them. Electron
+  // is told, so its next arm attaches again instead of believing hooks are still on.
   for (const session of attached) {
     session.detached.connect((reason) => {
       if (gating !== current) return
       gating = null
       signal.disconnect(onChild)
+      for (const other of attached) {
+        if (other === session) continue
+        void Promise.resolve(other.disableChildGating?.())
+          .catch(() => undefined)
+          .then(() => other.detach())
+          .catch(() => undefined)
+      }
       process.stderr.write(`Stopped watching zygote (${reason})\n`)
+      process.stderr.write(`${JSON.stringify({ sg: 'ungated', reason: String(reason) })}\n`)
     })
   }
   return {}

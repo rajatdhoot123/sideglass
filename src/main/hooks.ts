@@ -206,6 +206,7 @@ export class Hooks {
     return new HookHost(
       (line) => this.say(line),
       (pkg, pid) => this.hooked.set(pkg, { pid, at: Date.now() }),
+      () => this.gateLost(),
     )
   }
 
@@ -247,6 +248,15 @@ export class Hooks {
     this.gating = false
     await this.host?.ungate().catch(() => undefined)
     this.message = 'The phone runtime restarted; turning hooks on again...'
+    this.say(this.message)
+    this.announce()
+  }
+
+  /** The host dropped its zygote gate on its own, so the next arm must attach again. */
+  private gateLost(): void {
+    if (!this.gating) return
+    this.gating = false
+    this.message = 'Hooks stopped watching the phone runtime; turning them on again will reattach.'
     this.say(this.message)
     this.announce()
   }
@@ -376,6 +386,8 @@ class HookHost {
   constructor(
     private readonly log: (line: string) => void,
     private readonly onHooked: (pkg: string, pid: number) => void,
+    /** The host stopped watching zygote by itself (a zygote session ended). */
+    private readonly onUngated: () => void,
   ) {}
 
   /** Connects to frida-server on the phone and lists its processes. */
@@ -486,7 +498,12 @@ class HookHost {
         const parsed = JSON.parse(text) as {
           sg?: string
           pkg?: string
+          reason?: string
           message?: { type?: string; payload?: { sg?: string; level?: string; text?: string; pkg?: string; pid?: number }; description?: string }
+        }
+        if (parsed.sg === 'ungated') {
+          this.onUngated()
+          continue
         }
         if (parsed.sg === 'script') {
           const msg = parsed.message

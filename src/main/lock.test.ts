@@ -23,3 +23,12 @@ test('storage only reads plain paths inside the app folders', async () => {
   assert.equal(readablePath('/data/data/com.other/databases/x.db', 'com.a.b', 'su'), false)
   assert.equal(readablePath('databases/app.db', 'com.a.b', 'run-as'), true)
 })
+
+test('only a refused PIN stops the lock keeper; a silent or failed verify is retried', async () => {
+  const { verifyResult } = await import('./lock')
+  assert.equal(verifyResult('Lock credential verified successfully\n'), 'verified')
+  assert.equal(verifyResult("Old password '1234' didn't match\n"), 'rejected')
+  assert.equal(verifyResult(''), 'unknown')
+  assert.equal(verifyResult(null), 'unknown')
+  assert.equal(verifyResult("Can't find service: lock_settings\n"), 'unknown')
+})

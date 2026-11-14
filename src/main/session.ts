@@ -42,6 +42,16 @@ import type { Sdk } from './sdk'
 import type { Device, LaunchOptions, LaunchResult, PhoneMode, Settings } from '../shared'
 import type { ProxyRule } from './rules'
 
+/** Wait a few seconds for `svc wifi disable` to stick. True once Wi-Fi reads off. */
+async function wifiOff(adb: Adb): Promise<boolean> {
+  for (let i = 0; i < 10; i++) {
+    const on = (await adb.shell('settings get global wifi_on', 10_000).catch(() => '')).trim()
+    if (on === '0') return true
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  return false
+}
+
 export type StepId = 'sdk' | 'ca' | 'proxy' | 'avd' | 'boot' | 'magisk' | 'device' | 'route' | 'trust' | 'ready'
 export interface Progress {
   step: StepId
@@ -207,7 +217,14 @@ export class Session extends EventEmitter {
     // `-http-proxy`; only mobile data passes the capture proxy. With Wi-Fi on, apps
     // prefer it and none of their calls show. The setting persists across boots.
     await emu.adb.shell('svc wifi disable').catch(() => undefined)
-    this.log('Wi-Fi is off on the capture phone so all traffic goes through Sideglass (mobile data).')
+    if (await wifiOff(emu.adb)) {
+      this.log('Wi-Fi is off on the capture phone so all traffic goes through Sideglass (mobile data).')
+    } else {
+      this.log(
+        'Could not turn Wi-Fi off on the capture phone. Its Wi-Fi bypasses the proxy, so app calls may not show. ' +
+          'Turn Wi-Fi off in the phone quick settings.',
+      )
+    }
     return emu.adb
   }
 
