@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, Notification, safeStorage, shell } from 'electron'
 import type { ExchangeSummary, KeyEvent, Settings } from '../shared'
 import type { ReplayEdit } from './replay'
 import type { ProxyRule } from './rules'
@@ -14,6 +14,20 @@ import { Session } from './session'
 import { loadSettings, saveSettings } from './settings'
 import { findSdk, sdkAt } from './sdk'
 import { usbPhones } from './store/usb'
+import {
+  ChangePoller,
+  changeMessage,
+  checkWatcher,
+  createWatch,
+  dashboardUrl,
+  loadWatcherConfig,
+  normalizeWatcherUrl,
+  parseWatchOptions,
+  saveWatcherConfig,
+  type TokenCipher,
+  type WatcherConfig,
+  type WatcherStatus,
+} from './watcher'
 import type { CloneOptions, CodeSearchOptions } from '../shared'
 
 let session: Session | null = null
@@ -311,11 +325,114 @@ ipcMain.handle('calls:save', async (_, ids: unknown, format: unknown, layout: un
   return { path: target.filePath, count: exchanges.length, missing }
 })
 
+// API Watcher: a separate Cloudflare Worker that re-sends a request on an interval and diffs the responses.
+const watcherFile = () => join(app.getPath('userData'), 'watcher.json')
+const tokenCipher: TokenCipher = {
+  available: () => safeStorage.isEncryptionAvailable(),
+  encrypt: (text) => safeStorage.encryptString(text).toString('base64'),
+  decrypt: (stored) => safeStorage.decryptString(Buffer.from(stored, 'base64')),
+}
+let watcherConfig: WatcherConfig | null | undefined
+const currentWatcher = (): WatcherConfig | null => {
+  if (watcherConfig === undefined) watcherConfig = loadWatcherConfig(watcherFile(), tokenCipher)
+  return watcherConfig
+}
+const requireWatcher = (): WatcherConfig => {
+  const config = currentWatcher()
+  if (!config) throw new Error('Set up the watcher first: its URL and token')
+  return config
+}
+const watcherStatus = (): WatcherStatus => {
+  const config = currentWatcher()
+  return { url: config?.url ?? '', hasToken: Boolean(config?.token) }
+}
+let dashboard: BrowserWindow | null = null
+let dashboardOrigin = ''
+
+/** The dashboard is the worker's own web page, in its own window, with no access to Sideglass. */
+function openDashboard(watchId?: string): void {
+  const config = requireWatcher()
+  const target = dashboardUrl(config, watchId)
+  const origin = new URL(config.url).origin
+  // The navigation guard holds the origin it was made for. A new watcher URL gets a new window.
+  if (dashboard && !dashboard.isDestroyed() && dashboardOrigin !== origin) {
+    dashboard.destroy()
+    dashboard = null
+  }
+  if (dashboard && !dashboard.isDestroyed()) {
+    void dashboard.loadURL(target)
+    dashboard.show()
+    dashboard.focus()
+    return
+  }
+  const opened = new BrowserWindow({
+    width: 1200,
+    height: 820,
+    minWidth: 640,
+    minHeight: 480,
+    title: 'API Watcher',
+    backgroundColor: windowColor(),
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+  })
+  dashboard = opened
+  dashboardOrigin = origin
+  opened.webContents.on('will-navigate', (event, url) => {
+    if (new URL(url).origin !== origin) event.preventDefault()
+  })
+  opened.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//.test(url)) void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  opened.on('closed', () => {
+    if (dashboard === opened) dashboard = null
+  })
+  void opened.loadURL(target)
+}
+
+const changePoller = new ChangePoller(currentWatcher, (change) => {
+  if (!Notification.isSupported()) return
+  const notification = new Notification({ title: `Changed: ${change.name}`, body: changeMessage(change) })
+  notification.on('click', () => {
+    try {
+      openDashboard(change.watchId)
+    } catch {
+      // Watcher settings were removed since.
+    }
+  })
+  notification.show()
+})
+
+ipcMain.handle('watcher:status', () => watcherStatus())
+ipcMain.handle('watcher:configure', async (_, url: unknown, token: unknown) => {
+  if (typeof url !== 'string') throw new Error('Missing watcher URL')
+  const given = typeof token === 'string' ? token.trim() : ''
+  const nextUrl = normalizeWatcherUrl(url)
+  const saved = currentWatcher()
+  // An empty token field keeps the saved one, so the window never has to hold it. Only for the
+  // same watcher: the saved token must never be sent to a URL it was not saved for.
+  const kept = saved && saved.url === nextUrl ? saved.token : ''
+  const next: WatcherConfig = { url: nextUrl, token: given || kept }
+  if (!next.token) throw new Error(saved && saved.url !== nextUrl ? 'Paste the token for this watcher URL' : 'Paste the watcher token')
+  await checkWatcher(next)
+  saveWatcherConfig(watcherFile(), tokenCipher, next)
+  watcherConfig = next
+  changePoller.reset()
+  return watcherStatus()
+})
+ipcMain.handle('watcher:watch', async (_, id: unknown, options: unknown) => {
+  if (typeof id !== 'string') throw new Error('Pick a request')
+  const exchange = requireSession().getExchange(id)
+  if (!exchange) throw new Error('That request is no longer in this session')
+  return createWatch(requireWatcher(), exchange, parseWatchOptions(options))
+})
+ipcMain.handle('watcher:open', (_, watchId?: unknown) => openDashboard(typeof watchId === 'string' ? watchId : undefined))
+
 app.whenReady().then(() => {
   const logFile = join(app.getPath('userData'), 'sideglass.log')
   installQuietLog(logFile)
   appendLog(logFile, `Sideglass ${new Date().toISOString()}`)
   createWindow()
+  changePoller.start()
   nativeTheme.on('updated', () => {
     if (window && !window.isDestroyed()) window.setBackgroundColor(windowColor())
   })

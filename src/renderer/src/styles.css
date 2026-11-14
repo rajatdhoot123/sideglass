@@ -267,3 +267,19 @@ button.on { border-color: var(--accent); color: var(--accent); }
 .tok-num { color: var(--tok-num); }
 .tok-ann { color: var(--tok-ann); }
 .tok-type.link:hover { text-decoration: underline; cursor: pointer; }
+
+/* API Watcher: hand a request over, and its settings. */
+.watch-panel { margin: 0 8px 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; }
+.watch-head { display: flex; align-items: center; gap: 8px; }
+.watch-head b { flex: 1; }
+.watch-head .link { border: none; background: none; color: var(--accent); padding: 0; }
+.watch-form, .watch-setup { display: flex; flex-direction: column; gap: 6px; }
+.watch-form label, .watch-setup label { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 8px; }
+.watch-form label > span:first-child, .watch-setup label > span { color: var(--muted); font-size: 12px; }
+.watch-form input, .watch-setup input, .watch-form select { min-width: 0; }
+.watch-every { display: flex; gap: 6px; }
+.watch-every input { width: 80px; }
+.watch-done { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.watch-done span { flex: 1; }
+.watch-setup p, .watch-form p { margin: 0; }
+.detail-actions button.on { border-color: var(--accent); color: var(--accent); }

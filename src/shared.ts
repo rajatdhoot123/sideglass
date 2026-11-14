@@ -12,7 +12,9 @@ import type { StoreApp } from './main/store/fdroid'
 import type { UsbPhone } from './main/store/usb'
 import type { CloneOptions, CloneResult } from './main/clone'
 import type { SaveFormat, SaveLayout } from './main/export-calls'
+import type { IntervalUnit, WatchCreated, WatcherStatus, WatchOptions } from './main/watcher'
 
+export type { IntervalUnit, WatchCreated, WatcherStatus, WatchOptions }
 export type { CodeHit, CodeIndex, CodeProgress, CodeSearch, CodeSearchOptions }
 export type { CloneOptions, CloneResult, LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput, ProxyRule, ReplayEdit, StorageEntry, Refusal, RefusalKind, HooksSnapshot, SaveFormat, SaveLayout }
 /** Where a save wrote, and how many requests made it into the file or folder. */
@@ -135,6 +137,14 @@ export interface Api {
    * `each` asks for a folder and writes one file per request. Cancelled dialogs return null.
    */
   saveCalls(ids: string[], format: SaveFormat, layout: SaveLayout): Promise<SaveResult | null>
+  /** The API Watcher's URL, and whether a token is saved. The token itself stays in the main process. */
+  watcherStatus(): Promise<WatcherStatus>
+  /** Check the URL and token against the watcher, then save them. An empty token keeps the saved one. */
+  configureWatcher(url: string, token: string): Promise<WatcherStatus>
+  /** Hand a captured request to the watcher, to re-send on an interval and diff the responses. */
+  watch(id: string, options: WatchOptions): Promise<WatchCreated>
+  /** Open the watcher dashboard in its own window, at one watch if given. */
+  openWatcher(watchId?: string): Promise<void>
   on(channel: 'progress', cb: (p: Progress) => void): () => void
   on(channel: 'setup-log', cb: (line: string) => void): () => void
   on(channel: 'exchanges', cb: (batch: ExchangeSummary[]) => void): () => void

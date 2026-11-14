@@ -9,6 +9,7 @@ import { Setup } from './Setup'
 import { Storage } from './Storage'
 import { Code, type CodeRequest } from './Code'
 import { Timeline } from './Timeline'
+import { WatchersButton } from './Watch'
 
 type Tab = 'requests' | 'timeline' | 'logs' | 'refused' | 'storage' | 'code'
 
@@ -141,6 +142,7 @@ export function App() {
           </button>
           <div className="spacer" />
           <DeviceSwitch current={settings} onSave={(s) => void choose(s)} />
+          <WatchersButton />
           <button
             onClick={async () => {
               await window.api.clear()
