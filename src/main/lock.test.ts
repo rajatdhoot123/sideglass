@@ -14,3 +14,12 @@ test('only types PINs made of digits', () => {
   assert.equal(isPin('12'), false)
   assert.equal(isPin('12 34; reboot'), false)
 })
+
+test('storage only reads plain paths inside the app folders', async () => {
+  const { readablePath } = await import('./storage')
+  assert.equal(readablePath('/data/data/com.a.b/shared_prefs/x.xml', 'com.a.b', 'su'), true)
+  assert.equal(readablePath('/data/data/com.a.b/shared_prefs/a;id>x.xml', 'com.a.b', 'su'), false)
+  assert.equal(readablePath('/data/data/com.a.b/databases/../../x', 'com.a.b', 'shell'), false)
+  assert.equal(readablePath('/data/data/com.other/databases/x.db', 'com.a.b', 'su'), false)
+  assert.equal(readablePath('databases/app.db', 'com.a.b', 'run-as'), true)
+})

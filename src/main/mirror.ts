@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { EventEmitter } from 'node:events'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AdbServerClient, type Adb as TangoAdb } from '@yume-chan/adb'
 import { AdbScrcpyClient, AdbScrcpyExitedError, AdbScrcpyOptions3_3_3 } from '@yume-chan/adb-scrcpy'
@@ -26,6 +28,8 @@ import { Screen } from './screen'
  */
 const SERVER_VERSION = '3.3.3'
 const SERVER_URL = `https://github.com/Genymobile/scrcpy/releases/download/v${SERVER_VERSION}/scrcpy-server-v${SERVER_VERSION}`
+/** SHA-256 GitHub publishes for the v3.3.3 scrcpy-server asset. It runs on the phone, so nothing else is used. */
+const SERVER_SHA256 = '7e70323ba7f259649dd4acce97ac4fefbae8102b2c6d91e2e7be613fd5354be0'
 
 type VideoClient = AdbScrcpyClient<AdbScrcpyOptions3_3_3<true>>
 
@@ -45,6 +49,9 @@ export class Mirror extends EventEmitter {
   private controller: VideoClient['controller'] = undefined
   private readonly pointers = new Set<number>()
   private clip = 0
+  /** A FLAG_SECURE window is visible, so emulator screenshots stand in for the (black) video. */
+  private secureShown = false
+  private secureTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(
     private readonly adb: Adb,
@@ -52,7 +59,9 @@ export class Mirror extends EventEmitter {
     private readonly scid: number,
   ) {
     super()
-    this.frames = new Screen(adb)
+    // The emulator console splits its arguments on spaces, and the app data folder has one
+    // ("Application Support"), so emulator screenshots go to a temp folder without spaces.
+    this.frames = new Screen(adb, adb.serial.startsWith('emulator-') ? join(tmpdir(), `sideglass-shots-${scid}-${process.pid}`) : undefined)
   }
 
   async start(): Promise<void> {
@@ -63,10 +72,38 @@ export class Mirror extends EventEmitter {
     this.emit('mode', this.mode)
     const ticket = this.ticket
     void this.tryVideo(ticket)
+    if (this.adb.serial.startsWith('emulator-')) this.secureTimer = setInterval(() => void this.checkSecure(), 1_000)
+  }
+
+  /** While video runs, swap to emulator screenshots for as long as a secure window is visible. */
+  private async checkSecure(): Promise<void> {
+    if (this.closed || !this.video) return
+    const visible = await this.adb.shell('dumpsys window visible', 5_000).catch(() => null)
+    if (visible === null || this.closed || !this.video) return
+    const secure = /^\s*fl=.*\bSECURE\b/m.test(visible)
+    if (secure && !this.secureShown) {
+      this.secureShown = true
+      this.mode = 'frames'
+      this.emit('mode', 'frames')
+      void this.frames.start()
+    } else if (!secure && this.secureShown) {
+      this.endSecure()
+      this.mode = 'video'
+      this.emit('mode', 'video')
+      await this.refresh().catch(() => undefined)
+    }
+  }
+
+  private endSecure(): void {
+    if (!this.secureShown) return
+    this.secureShown = false
+    this.frames.stop()
   }
 
   stop(): void {
     this.closed = true
+    if (this.secureTimer) clearInterval(this.secureTimer)
+    this.secureTimer = null
     this.ticket++
     this.frames.stop()
     this.dropVideo()
@@ -75,6 +112,8 @@ export class Mirror extends EventEmitter {
   /** The renderer could not decode the stream, or the stream ended. Go back to screenshots. */
   useFrames(): void {
     this.allowVideo = false
+    // Screenshots take over for good; they already show secure windows.
+    this.secureShown = false
     if (this.closed) return
     this.ticket++
     const idle = this.mode === 'frames' && !this.video && !this.shotsPaused
@@ -203,7 +242,8 @@ export class Mirror extends EventEmitter {
   }
 
   async keyEvent(event: KeyEvent): Promise<void> {
-    const controller = this.mode === 'video' ? this.controller : undefined
+    // Still live behind the screenshots shown for a secure window, so typing a PIN works.
+    const controller = this.mode === 'video' || this.secureShown ? this.controller : undefined
     if (!controller) return
     if (event.action === 'down' && isTypingKey(event.code, event.key, event)) {
       await controller.injectText(event.key)
@@ -344,6 +384,14 @@ export class Mirror extends EventEmitter {
                     width,
                     height,
                   }
+            // Secure windows encode as black. Hold the packets back; a fresh keyframe follows after.
+            if (this.secureShown) {
+              if (!opened) {
+                opened = true
+                resolve()
+              }
+              continue
+            }
             this.emit('video', packet)
             if (this.mode !== 'video' && width > 0) {
               this.mode = 'video'
@@ -423,18 +471,18 @@ async function serverBytes(cacheDir: string): Promise<Uint8Array> {
   const path = join(cacheDir, `scrcpy-server-v${SERVER_VERSION}`)
   try {
     const existing = await readFile(path)
-    if (isJar(existing)) return new Uint8Array(existing)
+    if (trustedServer(existing)) return new Uint8Array(existing)
   } catch {
     // Download it.
   }
   const response = await fetch(SERVER_URL, { signal: AbortSignal.timeout(60_000) })
   if (!response.ok) throw new Error(`could not download scrcpy server (${response.status})`)
   const bytes = new Uint8Array(await response.arrayBuffer())
-  if (!isJar(bytes)) throw new Error('downloaded scrcpy server is not a jar')
+  if (!trustedServer(bytes)) throw new Error(`scrcpy server v${SERVER_VERSION} download did not match the published SHA-256`)
   await writeFile(path, bytes)
   return bytes
 }
 
-function isJar(bytes: Uint8Array): boolean {
-  return bytes.length > 1024 && bytes[0] === 0x50 && bytes[1] === 0x4b
+function trustedServer(bytes: Uint8Array): boolean {
+  return createHash('sha256').update(bytes).digest('hex') === SERVER_SHA256
 }

@@ -1,32 +1,29 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { test } from 'node:test'
+import { AGENT_SOURCE } from './agent'
+import { sha256, trustedServerXz } from './frida'
 
-const agent = readFileSync(join(process.cwd(), 'scripts', 'frida-agent', 'index.mjs'), 'utf8')
-
-test('the unpinning script covers the libraries the roadmap names', () => {
+test('the hooks agent unpins the TLS stacks the roadmap names', () => {
   for (const name of [
     'com.android.org.conscrypt.TrustManagerImpl',
     'okhttp3.CertificatePinner',
     'android.security.net.config.NetworkSecurityTrustManager',
     'SSL_CTX_set_custom_verify',
-    'flutter|ssl|boring|cronet|conscrypt',
+    'ssl|boring|cronet|conscrypt',
+    'X509_verify_cert',
   ]) {
-    assert.match(agent, new RegExp(name.replace(/[.]/g, '\\.')))
+    assert.ok(AGENT_SOURCE.includes(name), name)
   }
-  assert.doesNotMatch(agent, /httptoolkit/i)
+  assert.doesNotMatch(AGENT_SOURCE, /httptoolkit/i)
 })
 
-test('the unpinning agent compiles with the Java bridge', async (t) => {
-  const frida = await import('frida').catch(() => null)
-  if (!frida || typeof frida.Compiler !== 'function') {
-    t.skip('frida native module is not installed')
-    return
-  }
-  const compiler = new frida.Compiler()
-  const bundle = await compiler.build(join(process.cwd(), 'scripts', 'frida-agent', 'index.mjs'), { projectRoot: process.cwd() })
-  assert.match(bundle, /TrustManagerImpl/)
-  assert.match(bundle, /CertificatePinner/)
-  assert.match(bundle, /SSL_CTX_set_custom_verify/)
+test('the hooks agent keeps FLAG_SECURE off so the mirror is not black', () => {
+  assert.match(AGENT_SOURCE, /FLAG_SECURE off/)
+  assert.match(AGENT_SOURCE, /SurfaceView/)
+})
+
+test('only the published frida-server release files are trusted', () => {
+  assert.equal(trustedServerXz('android-arm64', Buffer.from('not frida')), false)
+  assert.equal(trustedServerXz('android-x86', Buffer.from('x')), false)
+  assert.equal(sha256(Buffer.from('abc')), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
 })

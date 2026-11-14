@@ -6,7 +6,6 @@ import { join } from 'node:path'
 import { installSystemCa, loadOrCreateCa, type CaFiles } from './certificate'
 import { CAPTURE_PIN, LockKeeper } from './lock'
 import { CAPTURE_PHONE, ensureAvd, IMAGE_ABI, ramdiskOf, sdkVersion, startEmulator, stopEmulator, type RunningEmulator } from './emulator'
-import { DeviceFrida } from './frida'
 import { fromHar } from './har'
 import { History } from './history'
 import { sendReplay, type ReplayEdit } from './replay'
@@ -33,7 +32,7 @@ import { packageFromPlayLink, PlayHelper } from './store/play'
 import { usbPhones, userApps } from './store/usb'
 import { Adb } from './adb'
 import { Attributor } from './attrib'
-import { ensureDirectAppStarts, Hooks, type HooksSnapshot } from './hooks'
+import { ensureDirectAppStarts, Hooks, waitForSettledRuntime, type HooksSnapshot } from './hooks'
 import { Timeline } from './timeline'
 import { Logcat, type LogLine } from './logcat'
 import { classifyRefusal, type Refusal } from './refusal'
@@ -56,6 +55,10 @@ export class Session extends EventEmitter {
   readonly timeline = new Timeline()
   private attrib: Attributor | null = null
   private lock: LockKeeper | null = null
+  private runtimeTimer: NodeJS.Timeout | null = null
+  /** system_server's pid when last seen. A new pid means the phone runtime restarted. */
+  private systemPid = ''
+  private recovering = false
   sdk: Sdk | null = null
   ca: CaFiles | null = null
   emulator: RunningEmulator | null = null
@@ -65,7 +68,6 @@ export class Session extends EventEmitter {
   logcat: Logcat | null = null
   readonly schema = new ProtoSchema()
   private history: History | null = null
-  private frida: DeviceFrida | null = null
   /** HAR files opened in this session, so their rows can be inspected like a live exchange. */
   private opened = new Map<string, Exchange>()
   /** USB mode: the phone whose proxy setting we changed, and the port, to undo on stop. */
@@ -136,10 +138,10 @@ export class Session extends EventEmitter {
       this.log('Requests are tagged with the app that opened the socket.')
       this.lock = new LockKeeper(adb, CAPTURE_PIN, this.log)
       await this.lock.start()
+      this.watchRuntime(adb)
     }
     if (this.mode === 'virtual' && this.hooksEnabled) await this.armIconHooks(adb)
     await this.attachScreen(adb)
-    await this.startFrida(adb)
     this.logcat = new Logcat(adb)
     this.logcat.on('lines', (lines: LogLine[]) => {
       this.checkRefusals(lines)
@@ -201,6 +203,11 @@ export class Session extends EventEmitter {
       await this.trust(emu.adb, ca)
       this.log(`Android API ${await sdkVersion(emu.adb)}: CA ${ca.androidName} trusted`)
     })
+    // The emulator's Wi-Fi goes out through netsimd straight to the internet, around
+    // `-http-proxy`; only mobile data passes the capture proxy. With Wi-Fi on, apps
+    // prefer it and none of their calls show. The setting persists across boots.
+    await emu.adb.shell('svc wifi disable').catch(() => undefined)
+    this.log('Wi-Fi is off on the capture phone so all traffic goes through Sideglass (mobile data).')
     return emu.adb
   }
 
@@ -328,6 +335,7 @@ export class Session extends EventEmitter {
   }
 
   installFromStore(pkg: string): Promise<string> {
+    this.requirePackage(pkg)
     return installFromFdroid(this.requireAdb(), pkg, join(this.downloads, 'fdroid'), (l) => this.emit('store-log', l))
   }
 
@@ -369,6 +377,7 @@ export class Session extends EventEmitter {
   }
 
   async installFromUsb(serial: string, pkg: string): Promise<string> {
+    this.requirePackage(pkg)
     this.emit('store-log', `Copying ${pkg} from ${serial}…`)
     const apks = await pullApp(new Adb(this.sdk!.adb, serial), pkg, join(this.downloads, 'usb'))
     const result = await installApks(this.requireAdb(), apks)
@@ -398,7 +407,10 @@ export class Session extends EventEmitter {
       .sort()
   }
 
-  /** Restart an app so it starts in a process that sees our CA. With unpin, Frida spawns it. */
+  /**
+   * Restart an app so it starts in a process that sees our CA. With Hooks on, or with unpin,
+   * the hooks agent (which includes certificate unpinning) is loaded into it.
+   */
   async launch(pkg: string, options?: LaunchOptions): Promise<LaunchResult> {
     if (!isPackageName(pkg)) throw new Error(`Invalid package name: ${pkg}`)
     const adb = this.requireAdb()
@@ -420,11 +432,13 @@ export class Session extends EventEmitter {
     if (this.attrib) this.attrib.preferPkg = pkg
     this.refusals.delete(pkg)
     // Hooks need root. A USB phone, and any other emulator treated as one, stays on a normal launch.
-    if (this.hooksEnabled && this.mode === 'virtual') {
+    const unpin = Boolean(options?.unpin)
+    if (unpin && this.mode !== 'virtual') throw new Error('Certificate unpinning needs the rooted virtual phone.')
+    if ((this.hooksEnabled || unpin) && this.mode === 'virtual') {
       try {
         const hooks = this.getHooks()
         // The same path as the Hooks switch: one arm at a time, and the app pool is cleared first.
-        if (!hooks.gating && (await this.armIconHooks(adb))) await this.attachScreen(adb)
+        if (this.hooksEnabled && !hooks.gating && (await this.armIconHooks(adb))) await this.attachScreen(adb)
         if (hooks.gating) {
           // Zygote loads the agent into the new process. Spawning again would inject it twice.
           await adb.shell(`am force-stop ${pkg}`)
@@ -450,20 +464,14 @@ export class Session extends EventEmitter {
         this.watch(pkg, pid)
         return { device: 'capture', pid, hooked: true, message }
       } catch (error) {
+        // Unpinning was asked for: a normal start would just show the same refused TLS again.
+        if (unpin) throw new Error(`${pkg} could not start with certificate unpinning: ${(error as Error).message}`)
         const fallback = `Hooks unavailable (${(error as Error).message}); launching normally`
         this.emit('hooks-log', fallback)
         message = message ? `${message} ${fallback}` : fallback
       }
     }
     await adb.shell(`am force-stop ${pkg}`)
-    if (options?.unpin) {
-      if (!this.frida) {
-        throw new Error('Certificate unpinning needs Frida on a rooted phone. It is not running for this session.')
-      }
-      const spawned = await this.frida.spawn(pkg)
-      const unpinNote = `${pkg} started with certificate unpinning.`
-      return { device: 'capture', pid: spawned.pid, message: message ? `${message} ${unpinNote}` : unpinNote }
-    }
     await adb.shell(`am start -n '${component}'`)
     await new Promise((r) => setTimeout(r, 1500))
     const pid = await this.pidOf(pkg)
@@ -504,7 +512,9 @@ export class Session extends EventEmitter {
       hooks.enabled = on
       if (on && this.device) {
         void this.armIconHooks(this.device).then((restarted) => {
-          if (restarted && this.device) void this.attachScreen(this.device)
+          if (restarted && this.device) {
+            void this.attachScreen(this.device).catch((error) => this.log(`Screen did not reopen: ${(error as Error).message}`))
+          }
         })
       } else {
         void hooks.disarm()
@@ -546,6 +556,44 @@ export class Session extends EventEmitter {
       if (restarted && this.ca) await this.trust(adb, this.ca).catch(() => undefined)
       this.log(`Opening an app from its icon will not inject hooks (${(error as Error).message}). The launch list still tries.`)
       return restarted
+    } finally {
+      // This restart was ours: the next check takes the new system_server as its baseline.
+      if (restarted) this.systemPid = ''
+    }
+  }
+
+  /**
+   * Notice the phone runtime restarting on its own (system_server crashed, or zygote was
+   * restarted by something else). Everything tied to the old runtime is then gone: the CA
+   * mount, the zygote hooks, the scrcpy server.
+   */
+  private watchRuntime(adb: Adb): void {
+    const check = async () => {
+      if (this.hooksArm || this.recovering) return
+      const pid = (await adb.shell('pidof system_server', 5_000).catch(() => '')).trim()
+      if (!pid) return
+      const before = this.systemPid
+      this.systemPid = pid
+      if (before && pid !== before) await this.recoverRuntime(adb)
+    }
+    void check()
+    this.runtimeTimer = setInterval(() => void check(), 5_000)
+  }
+
+  private async recoverRuntime(adb: Adb): Promise<void> {
+    this.recovering = true
+    try {
+      this.log('The phone runtime restarted. Setting the certificate, screen and hooks up again...')
+      await waitForSettledRuntime(adb)
+      if (this.ca) await this.trust(adb, this.ca)
+      await this.hooks?.runtimeRestarted()
+      await this.attachScreen(adb).catch((error) => this.log(`Screen did not reopen: ${(error as Error).message}`))
+      if (this.hooksEnabled) await this.armIconHooks(adb)
+    } catch (error) {
+      this.log(`Could not recover from the runtime restart: ${(error as Error).message}`)
+    } finally {
+      this.recovering = false
+      this.systemPid = ''
     }
   }
 
@@ -669,36 +717,18 @@ export class Session extends EventEmitter {
     return readAppStorage(this.requireAdb(), pkg)
   }
 
-  private async startFrida(adb: Adb): Promise<void> {
-    if (!(await adb.asRoot())) {
-      this.log('Certificate unpinning stays off: this phone is not rooted.')
-      return
-    }
-    const frida = new DeviceFrida(adb, join(this.dataDir, 'frida'), (line) => {
-      this.log(line)
-      this.emit('store-log', line)
-    })
-    try {
-      await frida.start()
-      this.frida = frida
-    } catch (error) {
-      this.log(`Frida did not start: ${(error as Error).message}. Certificate unpinning is unavailable.`)
-      await frida.stop().catch(() => undefined)
-    }
-  }
-
   async stop(): Promise<void> {
     const decompiler = this.decompilerInstance
     this.decompilerInstance = null
     await decompiler?.dispose().catch(() => undefined)
-    await this.frida?.stop().catch(() => undefined)
-    this.frida = null
     this.history?.close()
     this.history = null
     this.attrib?.stop()
     this.attrib = null
     this.lock?.stop()
     this.lock = null
+    if (this.runtimeTimer) clearInterval(this.runtimeTimer)
+    this.runtimeTimer = null
     this.screen?.stop()
     this.logcat?.stop()
     await this.hooks?.stop().catch(() => undefined)

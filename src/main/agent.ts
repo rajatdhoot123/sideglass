@@ -280,6 +280,87 @@ function hookNative() {
   })
 }
 
+/* --- TLS libraries bundled inside the app (cronet, conscrypt, a private BoringSSL, Flutter) ---
+ * Their verify functions are module-local, so the global-export hooks above never see them. */
+
+var tlsHooked = {}
+var tlsAccept = null
+
+function tlsOnce(address, install) {
+  if (!address || address.isNull()) return false
+  var key = address.toString()
+  if (tlsHooked[key]) return false
+  try { install(address); tlsHooked[key] = true; return true } catch (e) { return false }
+}
+
+function isExecutable(address) {
+  if (!address || address.isNull()) return false
+  try {
+    var range = Process.findRangeByAddress(address)
+    return Boolean(range && range.protection.indexOf('x') !== -1)
+  } catch (e) { return false }
+}
+
+/** Exported symbol, or (Flutter only, which strips exports) a function symbol. Never a data symbol. */
+function tlsSymbol(mod, name) {
+  try { var exp = mod.findExportByName(name); if (isExecutable(exp)) return exp } catch (e) {}
+  if (!/flutter/i.test(mod.name) || typeof mod.enumerateSymbols !== 'function') return null
+  try {
+    var syms = mod.enumerateSymbols()
+    for (var i = 0; i < syms.length; i++) {
+      if (syms[i].name === name && syms[i].type === 'function' && isExecutable(syms[i].address)) return syms[i].address
+    }
+  } catch (e) {}
+  return null
+}
+
+function tlsCustomVerify(address) {
+  return tlsOnce(address, function (target) {
+    var listener = { onEnter: function (args) { args[1] = ptr(0); args[2] = tlsAccept } }
+    pin(listener)
+    Interceptor.attach(target, listener)
+  })
+}
+
+function tlsVerifyNone(address) {
+  return tlsOnce(address, function (target) {
+    var listener = { onEnter: function (args) { args[1] = ptr(0); args[2] = ptr(0) } }
+    pin(listener)
+    Interceptor.attach(target, listener)
+  })
+}
+
+function tlsReturn(address, value) {
+  return tlsOnce(address, function (target) {
+    var listener = { onLeave: function (ret) { ret.replace(value) } }
+    pin(listener)
+    Interceptor.attach(target, listener)
+  })
+}
+
+function scanTlsModules() {
+  if (tlsAccept === null) tlsAccept = pin(new NativeCallback(function () { return 0 }, 'int', ['pointer', 'pointer']))
+  var count = 0
+  var mods = Process.enumerateModules()
+  for (var m = 0; m < mods.length; m++) {
+    var mod = mods[m]
+    var flutter = /flutter/i.test(mod.name)
+    if (!flutter && !/ssl|boring|cronet|conscrypt/i.test(mod.name)) continue
+    ;['SSL_CTX_set_custom_verify', 'SSL_set_custom_verify'].forEach(function (name) {
+      if (tlsCustomVerify(tlsSymbol(mod, name))) count++
+    })
+    // Flutter's statically linked BoringSSL crashed when more than the custom-verify callback was patched.
+    if (flutter) continue
+    ;['SSL_CTX_set_verify', 'SSL_set_verify'].forEach(function (name) {
+      if (tlsVerifyNone(tlsSymbol(mod, name))) count++
+    })
+    if (tlsReturn(tlsSymbol(mod, 'SSL_get_verify_result'), 0)) count++
+    if (tlsReturn(tlsSymbol(mod, 'X509_verify_cert'), 1)) count++
+  }
+  return count
+}
+
+
 function currentPackage() {
   try {
     var thread = Java.use('android.app.ActivityThread').currentActivityThread()
@@ -302,6 +383,7 @@ function skipPackage(pkg) {
   if (pkg.indexOf('com.google.android.gsf') === 0) return true
   if (pkg.indexOf('com.google.android.webview') === 0) return true
   if (pkg.indexOf('com.google.android.ext.') === 0) return true
+  if (/^com\.google\.android\.(inputmethod\.|apps\.nexuslauncher|permissioncontroller|packageinstaller)/.test(pkg)) return true
   return false
 }
 
@@ -320,6 +402,17 @@ function runNative() {
   if (nativeDone || !wantNative || !running) return
   nativeDone = true
   try { hookNative() } catch (e) { sgLog('warn', 'native hooks failed: ' + e) }
+  // Bundled TLS libraries are scanned a few times instead of hooking dlopen: patching the
+  // loader while the render thread set up EGL crashed apps in egl_display_t::initialize.
+  // The first scan waits for the first frame for the same reason.
+  ;[1500, 5000, 15000].forEach(function (delay) {
+    setTimeout(function () {
+      try {
+        var bundled = scanTlsModules()
+        if (bundled) sgLog('info', 'unpinned ' + bundled + ' functions in bundled TLS libraries')
+      } catch (e) { sgLog('warn', 'bundled TLS hooks failed: ' + e) }
+    }, delay)
+  })
 }
 
 function installJavaHooks(hint, attempt) {
@@ -524,6 +617,19 @@ function installJavaHooks(hint, attempt) {
     sgTry('WebViewClient SSL proceed', function () {
       var W = Java.use('android.webkit.WebViewClient')
       W.onReceivedSslError.implementation = function (view, handler, error) { handler.proceed() }
+    })
+
+    // FLAG_SECURE (0x2000) blanks the app in every screen capture, so the mirror shows black.
+    sgTry('FLAG_SECURE off', function () {
+      var SECURE = 0x2000
+      var W = Java.use('android.view.Window')
+      W.setFlags.implementation = function (flags, mask) { return this.setFlags(flags & ~SECURE, mask) }
+      W.addFlags.implementation = function (flags) { return this.addFlags(flags & ~SECURE) }
+    })
+
+    sgTry('SurfaceView secure off', function () {
+      var SV = Java.use('android.view.SurfaceView')
+      SV.setSecure.implementation = function (on) { return this.setSecure(false) }
     })
 
   scanForVerdictClasses()

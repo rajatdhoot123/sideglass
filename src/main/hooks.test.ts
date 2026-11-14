@@ -21,8 +21,9 @@ test('a zygote held by a tracer is reported as stopped', () => {
 test('a pre-forked app pool has to be cleared before icon taps can be hooked', () => {
   assert.equal(usapRestartNeeded('false', ['zygote64', 'system_server']), false)
   assert.equal(usapRestartNeeded('false', ['zygote64', 'usap64']), true)
-  assert.equal(usapRestartNeeded('null', ['zygote64']), true)
-  assert.equal(usapRestartNeeded('', []), true)
+  // Never set means off on current Android. Restarting for it took system_server down every session.
+  assert.equal(usapRestartNeeded('null', ['zygote64']), false)
+  assert.equal(usapRestartNeeded('', []), false)
   assert.equal(usapRestartNeeded('true', []), true)
 })
 

@@ -26,12 +26,14 @@ async function keyguardShowing(adb: Adb): Promise<boolean | null> {
 /**
  * Keeps the capture phone unlocked: the screen stays on, and whenever the lock screen comes
  * back (a reboot, a phone runtime restart for the launch hooks, the power key) the PIN is typed.
- * A wrong PIN is tried only once, so Android's lockout timer never starts.
+ * The PIN is verified without the screen first, so a wrong one is never typed and Android's lockout never starts.
  */
 export class LockKeeper {
   private timer: NodeJS.Timeout | null = null
   private busy = false
   private gaveUp = false
+  /** The PIN was confirmed once; it stays right for this phone. */
+  private verified = false
 
   constructor(
     private readonly adb: Adb,
@@ -57,20 +59,36 @@ export class LockKeeper {
     try {
       if ((await keyguardShowing(this.adb)) !== true) return true
       if (this.gaveUp || !isPin(this.pin)) return false
-      // Wake, raise the PIN pad (MENU dismisses the swipe screen), type the PIN.
-      await this.adb.shell('input keyevent KEYCODE_WAKEUP; input keyevent KEYCODE_MENU', 10_000)
-      await new Promise((r) => setTimeout(r, 800))
+      // Checked without the screen first, so a wrong PIN is never typed into the lock screen
+      // (five of those start Android's lockout). This also unlocks the user's storage after a
+      // boot, which apps and the package manager need before anything can launch.
+      if (!this.verified) {
+        const verify = await this.adb.shell(`locksettings verify --old ${this.pin}`, 10_000).catch(() => '')
+        if (!/verified successfully/i.test(verify)) {
+          this.gaveUp = true
+          this.log(
+            'The phone is locked and its PIN is not the one Sideglass set. Type the PIN on the phone screen: ' +
+              'the PIN pad shows black in the mirror, but typing still reaches it.',
+          )
+          return false
+        }
+        this.verified = true
+      }
+      // Wake, swipe up to raise the PIN pad, type the PIN. Too early after a boot the swipe
+      // does nothing; the next check tries again.
+      const { width, height } = await this.adb.screenSize().catch(() => ({ width: 1080, height: 2400 }))
+      const x = Math.round(width / 2)
+      await this.adb.shell(
+        `input keyevent KEYCODE_WAKEUP; sleep 0.5; input swipe ${x} ${Math.round(height * 0.8)} ${x} ${Math.round(height * 0.2)} 250`,
+        10_000,
+      )
+      await new Promise((r) => setTimeout(r, 1_200))
       await this.adb.shell(`input text ${this.pin}; input keyevent KEYCODE_ENTER`, 10_000)
       await new Promise((r) => setTimeout(r, 1_500))
       if ((await keyguardShowing(this.adb)) === false) {
         this.log('Unlocked the phone (it had locked behind its PIN).')
         return true
       }
-      this.gaveUp = true
-      this.log(
-        'The phone is locked and its PIN is not the one Sideglass set. Type the PIN on the phone screen: ' +
-          'the PIN pad shows black in the mirror, but typing still reaches it.',
-      )
       return false
     } catch {
       return false
