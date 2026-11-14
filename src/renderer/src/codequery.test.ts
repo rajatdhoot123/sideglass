@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { codeQueryFor, looksStatic } from './codequery'
+import { codeQueryFor, looksStatic, pendingCodeSearch } from './codequery'
 import { classPathFor, highlightJava } from './codeview'
 
 test('codeQueryFor keeps the hand-written part of a path', () => {
@@ -13,6 +13,14 @@ test('codeQueryFor falls back to the host for generic or empty paths', () => {
   assert.equal(codeQueryFor('https://events.example.io/'), 'events.example.io')
   assert.equal(codeQueryFor('https://example.com/api/123'), 'example.com')
   assert.equal(codeQueryFor('not a url'), 'not a url')
+})
+
+test('pendingCodeSearch waits until the index is the requested app', () => {
+  assert.equal(pendingCodeSearch('com.old', 'com.new', 'v1/users'), null)
+  assert.equal(pendingCodeSearch(null, 'com.new', 'v1/users'), null)
+  assert.equal(pendingCodeSearch('com.new', 'com.new', 'v1/users'), 'v1/users')
+  assert.equal(pendingCodeSearch('com.already', null, 'api.example.com'), 'api.example.com')
+  assert.equal(pendingCodeSearch('com.new', 'com.new', null), null)
 })
 
 test('looksStatic rejects ids and tokens', () => {

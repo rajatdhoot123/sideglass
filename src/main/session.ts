@@ -627,33 +627,38 @@ export class Session extends EventEmitter {
     return this.decompilerInstance
   }
 
+  private requirePackage(pkg: string): string {
+    if (!isPackageName(pkg)) throw new Error(`Invalid package name: ${pkg}`)
+    return pkg
+  }
+
   /** Decompile an installed app with jadx. A copy of the same version is reused unless [force]. */
   decompile(pkg: string, force?: boolean): Promise<CodeIndex> {
-    return this.decompiler.decompile(this.requireAdb(), pkg, Boolean(force))
+    return this.decompiler.decompile(this.requireAdb(), this.requirePackage(pkg), Boolean(force))
   }
 
   cancelDecompile(pkg: string): void {
-    this.decompiler.cancel(pkg)
+    this.decompiler.cancel(this.requirePackage(pkg))
   }
 
   codeIndex(pkg: string): Promise<CodeIndex | null> {
-    return this.decompiler.index(pkg, this.device)
+    return this.decompiler.index(this.requirePackage(pkg), this.device)
   }
 
   codeExportName(pkg: string): string {
-    return this.decompiler.exportName(pkg)
+    return this.decompiler.exportName(this.requirePackage(pkg))
   }
 
   exportCode(pkg: string, target: string): Promise<number> {
-    return this.decompiler.export(pkg, target)
+    return this.decompiler.export(this.requirePackage(pkg), target)
   }
 
   codeFile(pkg: string, file: string): Promise<string> {
-    return this.decompiler.read(pkg, file)
+    return this.decompiler.read(this.requirePackage(pkg), file)
   }
 
   searchCode(pkg: string, query: string, options?: CodeSearchOptions): Promise<CodeSearch> {
-    return this.decompiler.search(pkg, query, options)
+    return this.decompiler.search(this.requirePackage(pkg), query, options)
   }
 
   storage(pkg: string): Promise<StorageEntry[]> {
@@ -680,6 +685,9 @@ export class Session extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    const decompiler = this.decompilerInstance
+    this.decompilerInstance = null
+    await decompiler?.dispose().catch(() => undefined)
     await this.frida?.stop().catch(() => undefined)
     this.frida = null
     this.history?.close()

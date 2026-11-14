@@ -247,6 +247,7 @@ ipcMain.handle('code:search', (_, pkg: string, query: string, options?: CodeSear
 )
 ipcMain.handle('code:export', async (_, pkg: string) => {
   const current = requireSession()
+  const exportName = current.codeExportName(pkg)
   const picked = await dialog.showOpenDialog({
     title: `Export the decompiled code of ${pkg}`,
     buttonLabel: 'Export here',
@@ -255,7 +256,7 @@ ipcMain.handle('code:export', async (_, pkg: string) => {
   if (picked.canceled || !picked.filePaths[0]) return null
   const dir = picked.filePaths[0]
   // A new folder, so an export never mixes with files already there.
-  const folder = join(dir, unusedName(current.codeExportName(pkg), (name) => existsSync(join(dir, name))))
+  const folder = join(dir, unusedName(exportName, (name) => existsSync(join(dir, name))))
   const count = await current.exportCode(pkg, folder)
   shell.showItemInFolder(folder)
   return { path: folder, count }

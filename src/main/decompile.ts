@@ -34,9 +34,11 @@ export const LIBRARY_PREFIXES = [
   'net/sqlcipher/', 'io/realm/', 'com/tencent/', 'com/bytedance/', 'com/unity3d/', 'com/applovin/', 'com/ironsource/', 'org/checkerframework/',
 ]
 
-export function isLibraryPath(path: string): boolean {
+export function isLibraryPath(path: string, pkg?: string): boolean {
   if (!path.startsWith('sources/')) return false
   const rest = path.slice('sources/'.length)
+  // The app's own tree can sit under a prefix such as com/google/ or com/facebook/.
+  if (pkg && rest.startsWith(`${pkg.replaceAll('.', '/')}/`)) return false
   return LIBRARY_PREFIXES.some((prefix) => rest.startsWith(prefix))
 }
 
@@ -100,6 +102,22 @@ export function parseJadxErrors(text: string): number {
   return match ? Number(match[1]) : 0
 }
 
+/** What a finished jadx process means. Exit 3 still wrote the classes it could. A signal is a failure unless the user cancelled. */
+export function jadxOutcome(input: {
+  code: number | null
+  signal: NodeJS.Signals | null
+  cancelled: boolean
+  hasSources: boolean
+  errors: number
+}): { ok: true; errors: number } | { ok: false; message: string } {
+  if (input.cancelled) return { ok: false, message: 'Cancelled' }
+  if (input.signal) return { ok: false, message: `jadx was killed (${input.signal})` }
+  if (input.hasSources && (input.code === 0 || input.code === 3 || input.errors > 0)) {
+    return { ok: true, errors: input.code === 3 ? Math.max(input.errors, 1) : input.errors }
+  }
+  return { ok: false, message: `jadx exited ${input.code ?? 'without a status'}` }
+}
+
 /** versionCode, versionName and install time from `dumpsys package`, to know when a decompiled copy is out of date. */
 export function packageVersion(dumpsys: string): { key: string; label: string } {
   const code = /versionCode=(\d+)/.exec(dumpsys)?.[1] ?? '?'
@@ -151,20 +169,40 @@ async function listFiles(root: string): Promise<string[]> {
   return out.sort()
 }
 
+interface ActiveDecompile {
+  abort: AbortController
+  child: ChildProcess | null
+}
+
 /** Decompiles installed apps with jadx and keeps the result per package, so it opens instantly next time. */
 export class Decompiler {
-  private running = new Map<string, ChildProcess | null>()
+  private running = new Map<string, ActiveDecompile>()
   private cancelled = new Set<string>()
+  private inflight = new Set<Promise<unknown>>()
   private indexes = new Map<string, string[]>()
+  /** One jadx zip download at a time, so two apps cannot write the same partial jar. */
+  private jadxQueue: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly dataDir: string,
     private readonly progress: (p: CodeProgress) => void,
   ) {}
 
-  private appDir(pkg: string): string {
+  private assertPackage(pkg: string): void {
     if (!isPackageName(pkg)) throw new Error(`Invalid package name: ${pkg}`)
+  }
+
+  private appDir(pkg: string): string {
+    this.assertPackage(pkg)
     return join(this.dataDir, 'code', pkg)
+  }
+
+  /** Drop a pull or a half-written tree. A published `out/` is left alone. */
+  private removePartial(pkg: string): void {
+    if (!isPackageName(pkg)) return
+    const dir = join(this.dataDir, 'code', pkg)
+    rmSync(join(dir, 'out.part'), { recursive: true, force: true })
+    rmSync(join(dir, 'apk'), { recursive: true, force: true })
   }
 
   private outDir(pkg: string): string {
@@ -194,6 +232,7 @@ export class Decompiler {
 
   /** The decompiled copy of [pkg], if there is one. [adb] is used to tell whether the phone has a newer version. */
   async index(pkg: string, adb: Adb | null): Promise<CodeIndex | null> {
+    this.assertPackage(pkg)
     const meta = this.readMeta(pkg)
     if (!meta) return null
     let stale = false
@@ -205,18 +244,40 @@ export class Decompiler {
   }
 
   cancel(pkg: string): void {
-    if (!this.running.has(pkg)) return
+    const active = this.running.get(pkg)
+    if (!active) return
     this.cancelled.add(pkg)
-    this.running.get(pkg)?.kill()
+    active.abort.abort()
+    active.child?.kill()
+  }
+
+  /** Stop every decompile and wait until none of them can still publish a tree. */
+  async dispose(): Promise<void> {
+    for (const pkg of [...this.running.keys()]) this.cancel(pkg)
+    await Promise.allSettled([...this.inflight])
   }
 
   /** Pull [pkg] from the phone and decompile it. Reuses the last result unless the app changed or [force] is set. */
   async decompile(adb: Adb, pkg: string, force = false): Promise<CodeIndex> {
+    this.assertPackage(pkg)
     if (this.running.has(pkg)) throw new Error(`${pkg} is already being decompiled`)
-    this.running.set(pkg, null)
+    const active: ActiveDecompile = { abort: new AbortController(), child: null }
+    this.running.set(pkg, active)
     this.cancelled.delete(pkg)
+    const task = this.finishDecompile(adb, pkg, force, active)
+    this.inflight.add(task)
     try {
-      const dumpsys = await adb.shell(`dumpsys package ${pkg}`)
+      return await task
+    } finally {
+      this.inflight.delete(task)
+    }
+  }
+
+  private async finishDecompile(adb: Adb, pkg: string, force: boolean, active: ActiveDecompile): Promise<CodeIndex> {
+    let published = false
+    try {
+      const signal = active.abort.signal
+      const dumpsys = await adb.shell(`dumpsys package ${pkg}`, undefined, signal)
       if (!dumpsys.includes('versionCode=')) throw new Error(`${pkg} is not installed on the phone`)
       const version = packageVersion(dumpsys)
       const meta = this.readMeta(pkg)
@@ -227,27 +288,30 @@ export class Decompiler {
 
       const dir = this.appDir(pkg)
       this.progress({ pkg, message: `Copying ${pkg} from the phone…` })
-      const apks = await pullApp(adb, pkg, join(dir, 'apk'))
+      const apks = await pullApp(adb, pkg, join(dir, 'apk'), signal)
       this.checkCancelled(pkg)
-      const jar = await this.jadx(pkg)
+      const jar = await this.jadx(pkg, signal)
       this.checkCancelled(pkg)
 
       const work = join(dir, 'out.part')
       rmSync(work, { recursive: true, force: true })
       // Split APKs are mostly resources for one screen density, ABI or language. The code is in base.
       const base = apks.find((p) => /-base\.apk$/.test(p)) ?? apks[0]
-      const errors = await this.runJadx(pkg, jar, base, work)
+      const errors = await this.runJadx(pkg, jar, base, work, active)
+      this.checkCancelled(pkg)
       if (!existsSync(join(work, 'sources'))) throw new Error('jadx wrote no source files')
 
       const out = this.outDir(pkg)
       rmSync(out, { recursive: true, force: true })
       renameSync(work, out)
+      published = true
       rmSync(join(dir, 'apk'), { recursive: true, force: true })
       writeFileSync(join(dir, 'meta.json'), JSON.stringify({ key: version.key, version: version.label, decompiledAt: Date.now(), errors } satisfies Meta))
       this.indexes.delete(pkg)
       this.progress({ pkg, message: errors ? `Done. ${errors} classes could not be fully decompiled.` : 'Done', percent: 100, done: true })
       return (await this.index(pkg, null))!
     } catch (error) {
+      if (!published) this.removePartial(pkg)
       const message = this.cancelled.has(pkg) ? 'Cancelled' : (error as Error).message
       this.progress({ pkg, message, done: true })
       throw new Error(message)
@@ -261,37 +325,67 @@ export class Decompiler {
     if (this.cancelled.has(pkg)) throw new Error('Cancelled')
   }
 
-  private async jadx(pkg: string): Promise<string> {
+  private jadx(pkg: string, signal: AbortSignal): Promise<string> {
+    const run = this.jadxQueue.then(() => this.downloadJadx(pkg, signal))
+    this.jadxQueue = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+
+  private async downloadJadx(pkg: string, signal: AbortSignal): Promise<string> {
     const dir = join(this.dataDir, 'jadx')
     const jar = join(dir, `jadx-${JADX_VERSION}-all.jar`)
     if (existsSync(jar)) return jar
+    if (signal.aborted || this.cancelled.has(pkg)) throw new Error('Cancelled')
     this.progress({ pkg, message: `Downloading jadx ${JADX_VERSION} (first time only, about 70 MB)…` })
-    const response = await fetch(JADX_URL)
+    const response = await fetch(JADX_URL, { signal })
     if (!response.ok) throw new Error(`jadx download failed: HTTP ${response.status}`)
     const zip = Buffer.from(await response.arrayBuffer())
+    if (signal.aborted || this.cancelled.has(pkg)) throw new Error('Cancelled')
     if (createHash('sha256').update(zip).digest('hex') !== JADX_SHA256) throw new Error('jadx download did not match its checksum')
     const bytes = readEntry(zip, JADX_JAR)
     if (!bytes) throw new Error(`jadx download has no ${JADX_JAR}`)
     mkdirSync(dir, { recursive: true })
-    writeFileSync(`${jar}.part`, bytes)
-    renameSync(`${jar}.part`, jar)
+    const part = `${jar}.part`
+    try {
+      writeFileSync(part, bytes)
+      renameSync(part, jar)
+    } catch (error) {
+      rmSync(part, { force: true })
+      throw error
+    }
     return jar
   }
 
-  private runJadx(pkg: string, jar: string, apk: string, out: string): Promise<number> {
+  private runJadx(pkg: string, jar: string, apk: string, out: string, active: ActiveDecompile): Promise<number> {
     // jadx keeps the whole app in memory. Give it half the computer, between 1 and 6 GB.
     const heapMb = Math.max(1024, Math.min(6144, Math.floor(totalmem() / 1024 / 1024 / 2)))
     const threads = Math.max(2, Math.min(8, cpus().length - 1))
     const args = [`-Xmx${heapMb}m`, '-cp', jar, 'jadx.cli.JadxCLI', '-d', out, '-j', String(threads), '--show-bad-code', '--log-level', 'progress', apk]
     this.progress({ pkg, message: 'Decompiling…', percent: 0 })
     return new Promise((resolvePromise, reject) => {
-      const child = spawn(findJava(), args, { stdio: ['ignore', 'pipe', 'pipe'] })
-      this.running.set(pkg, child)
+      let settled = false
+      const finish = (fn: () => void) => {
+        if (settled) return
+        settled = true
+        fn()
+      }
+      let child: ChildProcess
+      try {
+        child = spawn(findJava(), args, { stdio: ['ignore', 'pipe', 'pipe'], signal: active.abort.signal })
+      } catch (error) {
+        finish(() => reject(error instanceof Error ? error : new Error(String(error))))
+        return
+      }
+      active.child = child
       let tail = ''
       let last = -1
       const onData = (chunk: Buffer) => {
         const text = chunk.toString()
-        tail = (tail + text).slice(-4000)
+        // Keep the tail across chunks so the final "count:" line is still here when close fires.
+        tail = (tail + text).slice(-8000)
         for (const line of text.split(/[\r\n]+/)) {
           const percent = parseJadxProgress(line)
           if (percent !== null && percent !== last) {
@@ -300,31 +394,47 @@ export class Decompiler {
           }
         }
       }
-      child.stdout.on('data', onData)
-      child.stderr.on('data', onData)
+      child.stdout?.on('data', onData)
+      child.stderr?.on('data', onData)
       child.on('error', (error) => {
-        const missing = (error as NodeJS.ErrnoException).code === 'ENOENT'
-        reject(missing ? new Error('Java was not found. Install Android Studio or a JDK 11+ and set JAVA_HOME.') : error)
+        const code = (error as NodeJS.ErrnoException).code
+        if (this.cancelled.has(pkg) || code === 'ABORT_ERR') {
+          finish(() => reject(new Error('Cancelled')))
+          return
+        }
+        const missing = code === 'ENOENT'
+        finish(() => reject(missing ? new Error('Java was not found. Install Android Studio or a JDK 11+ and set JAVA_HOME.') : error))
       })
-      child.on('exit', (code, signal) => {
-        if (this.cancelled.has(pkg) || signal) return reject(new Error('Cancelled'))
-        const errors = parseJadxErrors(tail)
-        // jadx exits 1 when some classes failed but still writes everything else.
-        if (code === 0 || (existsSync(join(out, 'sources')) && errors > 0)) return resolvePromise(errors)
-        const last = tail.trim().split('\n').filter(Boolean).pop() ?? ''
-        reject(new Error(`jadx exited ${code}${last ? `: ${last}` : ''}`))
+      // close waits until stdout and stderr end, so the error count is not lost to the exit race.
+      child.on('close', (code, signal) => {
+        const outcome = jadxOutcome({
+          code,
+          signal,
+          cancelled: this.cancelled.has(pkg),
+          hasSources: existsSync(join(out, 'sources')),
+          errors: parseJadxErrors(tail),
+        })
+        if (outcome.ok) {
+          finish(() => resolvePromise(outcome.errors))
+          return
+        }
+        const detail = tail.trim().split('\n').filter(Boolean).pop()
+        const message = !detail || outcome.message === 'Cancelled' || outcome.message.includes(detail) ? outcome.message : `${outcome.message}: ${detail}`
+        finish(() => reject(new Error(message)))
       })
     })
   }
 
   /** A folder name for an export, e.g. "org.tasks-14.2.1-decompiled". */
   exportName(pkg: string): string {
+    this.assertPackage(pkg)
     const version = /^(\S+)/.exec(this.readMeta(pkg)?.version ?? '')?.[1]
     return `${pkg}${version && version !== '?' ? `-${version.replace(/[^\w.-]/g, '_')}` : ''}-decompiled`
   }
 
   /** Copy the decompiled sources and resources into [target], a folder that must not exist yet. */
   async export(pkg: string, target: string): Promise<number> {
+    this.assertPackage(pkg)
     const out = this.outDir(pkg)
     if (!existsSync(join(out, 'sources'))) throw new Error(`${pkg} has not been decompiled yet`)
     if (existsSync(target)) throw new Error(`${target} already exists`)
@@ -338,6 +448,7 @@ export class Decompiler {
   }
 
   async read(pkg: string, file: string): Promise<string> {
+    this.assertPackage(pkg)
     const full = insideOutput(this.outDir(pkg), file)
     const info = await stat(full)
     if (info.size > MAX_FILE) return `// ${file} is ${(info.size / 1024 / 1024).toFixed(1)} MB, too large to show here.`
@@ -347,10 +458,11 @@ export class Decompiler {
   }
 
   async search(pkg: string, query: string, options: CodeSearchOptions = {}): Promise<CodeSearch> {
+    this.assertPackage(pkg)
     const q = query.trim()
     if (q.length < 2) return { hits: [], truncated: false, scanned: 0 }
     const root = this.outDir(pkg)
-    const wanted = (await this.files(pkg)).filter((f) => TEXT_FILE.test(f) && !(options.skipLibraries && isLibraryPath(f)))
+    const wanted = (await this.files(pkg)).filter((f) => TEXT_FILE.test(f) && !(options.skipLibraries && isLibraryPath(f, pkg)))
     // Code first, then the manifest and other resources.
     const files = [...wanted.filter((f) => f.startsWith('sources/')), ...wanted.filter((f) => !f.startsWith('sources/'))]
     const hits: CodeHit[] = []
