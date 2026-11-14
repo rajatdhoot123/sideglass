@@ -1,18 +1,13 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
-import net from 'node:net'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Adb } from './adb'
 import { AGENT_SOURCE } from './agent'
-
-/** Pinned to the exact `frida` npm version in package.json: client and server must match. */
-export const FRIDA_VERSION = '17.26.2'
+import { fridaArch, fridaServerBinary } from './frida'
 
 /** Non-standard port, so apps that scan for Frida's default port 27042 find nothing. */
 const SERVER_PORT = 27091
 const DEVICE_BIN = '/data/local/tmp/.sgsys'
-
-const FRIDA_ABI: Record<string, string> = { 'arm64-v8a': 'arm64', x86_64: 'x86_64' }
 
 export interface HooksSnapshot {
   enabled: boolean
@@ -32,10 +27,12 @@ const INJECT_TIMEOUT_MS = 20_000
 /**
  * True when the phone pre-forks app processes. Those forks happen before the user
  * taps an icon, so a later tap never passes through Frida. `device_config get` prints
- * `null` when the flag has never been set.
+ * `null` when the flag has never been set, which on current Android means the pool is
+ * off. Only an explicit `true` or a live usap process needs the zygote restart: the
+ * restart takes system_server down with it.
  */
 export function usapRestartNeeded(configValue: string, processNames: readonly string[]): boolean {
-  if (configValue.trim() !== 'false') return true
+  if (configValue.trim() === 'true') return true
   return processNames.some((name) => name === 'usap' || name === 'usap64')
 }
 
@@ -68,6 +65,8 @@ export async function ensureDirectAppStarts(adb: Adb, log: (line: string) => voi
   const before = await adb.su('ps -A -o PID,NAME').catch(() => '')
   if (!usapRestartNeeded(config, namesFromPs(before))) return false
   log('Restarting the phone runtime so an app opened from its icon can be hooked...')
+  // Play services syncs device_config from the server and would turn the pool back on.
+  await adb.su('device_config set_sync_disabled_for_tests persistent').catch(() => '')
   await adb.su('device_config put runtime_native usap_pool_enabled false')
   await adb.su('device_config put runtime_native usap_pool_size_max 0')
   const previous = pidOfName(before, 'zygote64') || pidOfName(before, 'zygote')
@@ -125,6 +124,18 @@ async function waitForFreshZygote(adb: Adb, previousPid: string): Promise<void> 
   throw new Error('the phone runtime did not come back without its pre-started app pool')
 }
 
+/** Resolve once the phone runtime is usable again after system_server restarted on its own. */
+export async function waitForSettledRuntime(adb: Adb, timeoutMs = 120_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const table = await adb.su('ps -A -o PID,NAME').catch(() => '')
+    const users = await adb.shell('dumpsys user 2>/dev/null | grep -m1 "State:"').catch(() => '')
+    if (runtimeSettled(users, table)) return
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+  throw new Error('the phone runtime did not come back')
+}
+
 function zygoteStatus(adb: Adb): Promise<string> {
   return adb.su('cat /proc/$(pidof zygote64 || pidof zygote)/status 2>/dev/null').catch(() => '')
 }
@@ -137,6 +148,20 @@ async function zygoteStuck(adb: Adb): Promise<boolean> {
     if (zygoteSample(await zygoteStatus(adb)) === 'running') return false
   }
   return true
+}
+
+/** pid of the hooks frida-server on the phone, or '' when it is not running. */
+async function serverPid(adb: Adb): Promise<string> {
+  return (await adb.su('pidof .sgsys').catch(() => '')).trim()
+}
+
+async function waitFor(check: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (await check()) return true
+    if (Date.now() > deadline) return false
+    await new Promise((r) => setTimeout(r, 300))
+  }
 }
 
 /**
@@ -201,6 +226,7 @@ export class Hooks {
     return new HookHost(
       (line) => this.say(line),
       (pkg, pid) => this.hooked.set(pkg, { pid, at: Date.now() }),
+      () => this.gateLost(),
     )
   }
 
@@ -269,6 +295,28 @@ export class Hooks {
     this.announce()
   }
 
+  /**
+   * The phone runtime restarted (system_server and zygote died), so the zygote sessions are
+   * gone. Forget them so the next arm attaches to the new zygote instead of returning early.
+   */
+  async runtimeRestarted(): Promise<void> {
+    if (!this.gating) return
+    this.gating = false
+    await this.host?.ungate().catch(() => undefined)
+    this.message = 'The phone runtime restarted; turning hooks on again...'
+    this.say(this.message)
+    this.announce()
+  }
+
+  /** The host dropped its zygote gate on its own, so the next arm must attach again. */
+  private gateLost(): void {
+    if (!this.gating) return
+    this.gating = false
+    this.message = 'Hooks stopped watching the phone runtime; turning them on again will reattach.'
+    this.say(this.message)
+    this.announce()
+  }
+
   /** Arming failed. `stop()` may already have wiped `message`; set it again and surface it. */
   private failArm(message: string): never {
     this.enabled = false
@@ -322,6 +370,16 @@ export class Hooks {
     this.gating = false
     await this.host?.stop().catch(() => undefined)
     this.host = null
+    if (this.serverReady) {
+      // Leave nothing behind on the phone: the server runs as root, and the forward holds a port.
+      try {
+        const adb = this.getAdb()
+        await adb.su('kill $(pidof .sgsys) 2>/dev/null; true').catch(() => undefined)
+        await adb.exec(['forward', '--remove', `tcp:${SERVER_PORT}`]).catch(() => undefined)
+      } catch {
+        // No phone any more.
+      }
+    }
     this.serverReady = false
     this.ready = false
     this.starting = false
@@ -340,17 +398,19 @@ export class Hooks {
       const local = await this.ensureLocalBinary()
       this.say('Starting launch hooks (frida-server)...')
 
-      // Restarting is idempotent: a stale server would refuse the port.
+      // Restarting is idempotent, but only once the old server has let go of the port.
       // Play images have no adb root. Magisk su starts the server so it can inject other apps.
       await adb.su('kill $(pidof .sgsys) 2>/dev/null; true').catch(() => undefined)
+      if (!(await waitFor(async () => !(await serverPid(adb)), 5_000))) throw new Error('the previous frida-server would not stop')
       await adb.execBuffer(['push', local, DEVICE_BIN], 120_000)
       await adb.shell(`chmod 700 ${DEVICE_BIN}`)
       await adb
         .su(`nohup ${DEVICE_BIN} -l 127.0.0.1:${SERVER_PORT} >/dev/null 2>&1 &`, 15_000)
         .catch(() => undefined)
+      if (!(await waitFor(async () => Boolean(await serverPid(adb)), 10_000))) throw new Error('frida-server did not start on the phone')
       await adb.exec(['forward', `tcp:${SERVER_PORT}`, `tcp:${SERVER_PORT}`])
-      await this.waitPort()
       this.host ??= this.newHost()
+      // A real round trip: the adb forward accepts connections even with nothing behind it.
       await this.host.ping()
       this.serverReady = true
       this.ready = true
@@ -369,49 +429,14 @@ export class Hooks {
     }
   }
 
-  private waitPort(timeoutMs = 20_000): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const started = Date.now()
-      const attempt = () => {
-        const socket = net.connect(SERVER_PORT, '127.0.0.1')
-        socket.setTimeout(1500)
-        socket.once('connect', () => {
-          socket.destroy()
-          resolve()
-        })
-        const retry = () => {
-          socket.destroy()
-          if (Date.now() - started > timeoutMs) reject(new Error('frida-server did not start on the phone'))
-          else setTimeout(attempt, 400)
-        }
-        socket.once('error', retry)
-        socket.once('timeout', retry)
-      }
-      attempt()
-    })
-  }
 
-  /** Local frida-server binary for this machine's emulator ABI, downloading once. */
+  /** Local frida-server binary for this machine's emulator ABI, downloaded once and checked. */
   private async ensureLocalBinary(): Promise<string> {
     const override = process.env.SIDEGLASS_FRIDA_SERVER
     if (override && existsSync(override)) return override
-    mkdirSync(this.cacheDir, { recursive: true })
-    const target = join(this.cacheDir, `frida-server-${FRIDA_VERSION}-${this.abi}`)
-    if (existsSync(target) && statSync(target).size > 5_000_000) return target
-
-    const fridaAbi = FRIDA_ABI[this.abi] ?? 'arm64'
-    const url = `https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-server-${FRIDA_VERSION}-android-${fridaAbi}.xz`
-    this.say(`Downloading frida-server ${FRIDA_VERSION} (${fridaAbi}), about 40 MB...`)
-    const response = await fetch(url)
-    if (!response.ok) throw new Error(`frida-server download failed: HTTP ${response.status}`)
-    const compressed = Buffer.from(await response.arrayBuffer())
-
-    const packed = `${target}.xz`
-    writeFileSync(packed, compressed)
-    const raw = decompressXz(packed)
-    if (raw.length < 1_000_000) throw new Error('frida-server decompression produced a suspiciously small file')
-    writeFileSync(target, raw)
-    return target
+    const arch = fridaArch(this.abi)
+    if (!arch) throw new Error(`No frida-server build for CPU ${this.abi}`)
+    return fridaServerBinary(this.cacheDir, arch, (line) => this.say(line))
   }
 }
 
@@ -433,10 +458,13 @@ class HookHost {
   constructor(
     private readonly log: (line: string) => void,
     private readonly onHooked: (pkg: string, pid: number) => void,
+    /** The host stopped watching zygote by itself (a zygote session ended). */
+    private readonly onUngated: () => void,
   ) {}
 
+  /** Connects to frida-server on the phone and lists its processes. */
   ping(): Promise<void> {
-    return this.request({ cmd: 'ping' }, 30_000).then(() => undefined)
+    return this.request({ cmd: 'ping', port: SERVER_PORT }, 30_000).then(() => undefined)
   }
 
   async spawn(pkg: string, source: string): Promise<number> {
@@ -542,14 +570,22 @@ class HookHost {
         const parsed = JSON.parse(text) as {
           sg?: string
           pkg?: string
-          message?: { type?: string; payload?: { sg?: string; text?: string; pkg?: string; pid?: number }; description?: string }
+          reason?: string
+          message?: { type?: string; payload?: { sg?: string; level?: string; text?: string; pkg?: string; pid?: number }; description?: string }
+        }
+        if (parsed.sg === 'ungated') {
+          this.onUngated()
+          continue
         }
         if (parsed.sg === 'script') {
           const msg = parsed.message
           if (msg?.type === 'send' && msg.payload?.sg === 'hooked' && msg.payload.pkg && msg.payload.pid) {
             this.onHooked(msg.payload.pkg, msg.payload.pid)
-          } else if (msg?.type === 'send' && msg.payload?.sg === 'log') this.log(`${parsed.pkg}: ${msg.payload.text}`)
-          else if (msg?.type === 'error') this.log(`${parsed.pkg}: hook error: ${msg.description ?? 'unknown'}`)
+          } else if (msg?.type === 'send' && msg.payload?.sg === 'log') {
+            // One debug line per hook per app ("… ok"). Shown in the window they replaced the
+            // status line many times a second and made the phone view flicker.
+            if (msg.payload.level !== 'debug') this.log(`${parsed.pkg}: ${msg.payload.text}`)
+          } else if (msg?.type === 'error') this.log(`${parsed.pkg}: hook error: ${msg.description ?? 'unknown'}`)
           continue
         }
       } catch {
@@ -594,21 +630,3 @@ function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T>
   })
 }
 
-/** .xz without a dependency: try the decompressors that ship with dev machines. */
-function decompressXz(path: string): Buffer {
-  const candidates: Array<[string, string[]]> = [
-    ['xz', ['-dc', path]],
-    ['7zz', ['e', '-so', path]],
-    ['7z', ['e', '-so', path]],
-    ['python3', ['-c', 'import lzma,sys;sys.stdout.buffer.write(lzma.decompress(open(sys.argv[1],"rb").read()))', path]],
-  ]
-  for (const [cmd, args] of candidates) {
-    try {
-      const result = spawnSync(cmd, args, { timeout: 120_000, maxBuffer: 512 * 1024 * 1024 })
-      if (result.status === 0 && result.stdout && result.stdout.length > 1_000_000) return result.stdout
-    } catch { /* try the next one */ }
-  }
-  throw new Error(
-    'Could not decompress frida-server (.xz). Install xz (brew install xz) or set SIDEGLASS_FRIDA_SERVER to a frida-server binary.',
-  )
-}

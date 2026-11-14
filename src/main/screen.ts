@@ -1,16 +1,25 @@
 import { EventEmitter } from 'node:events'
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { Adb } from './adb'
 
 /**
  * Screenshot fallback: repeated `screencap` frames and `input` taps. Works on any device
  * with no extra binary. `Mirror` uses it when the scrcpy stream cannot start.
+ *
+ * With `shotDir` (emulators only) frames come from the emulator itself instead. Android
+ * blanks FLAG_SECURE windows (PIN pads, banking screens) in `screencap` and scrcpy, but
+ * the emulator's own screenshot is of the composed display, so they show.
  */
 export class Screen extends EventEmitter {
   private running = false
   private ticket = 0
   size = { width: 1080, height: 2400 }
 
-  constructor(private readonly adb: Adb) {
+  constructor(
+    private readonly adb: Adb,
+    private readonly shotDir?: string,
+  ) {
     super()
   }
 
@@ -31,7 +40,7 @@ export class Screen extends EventEmitter {
     while (this.running && ticket === this.ticket) {
       const started = Date.now()
       try {
-        const png = await this.adb.execBuffer(['exec-out', 'screencap', '-p'])
+        const png = this.shotDir ? await this.emulatorShot(this.shotDir) : await this.adb.execBuffer(['exec-out', 'screencap', '-p'])
         if (png.length > 0) this.emit('frame', png)
       } catch (error) {
         // A frame can fail while the device reboots or shuts down; report it, never throw.
@@ -41,6 +50,20 @@ export class Screen extends EventEmitter {
       const wait = Math.max(0, 200 - (Date.now() - started))
       await new Promise((r) => setTimeout(r, wait))
     }
+  }
+
+  /** One PNG from the emulator console. It names the file itself, so the folder is emptied each time. */
+  private async emulatorShot(dir: string): Promise<Buffer> {
+    // The console would split a path with spaces and save into the emulator's working folder.
+    if (/\s/.test(dir)) throw new Error('emulator screenshot folder must not contain spaces')
+    await mkdir(dir, { recursive: true })
+    for (const old of await readdir(dir)) await rm(join(dir, old), { force: true })
+    await this.adb.exec(['emu', 'screenrecord', 'screenshot', dir], 10_000)
+    const files = (await readdir(dir)).filter((name) => name.endsWith('.png'))
+    if (!files.length) throw new Error('the emulator saved no screenshot')
+    const png = await readFile(join(dir, files[0]))
+    await rm(join(dir, files[0]), { force: true })
+    return png
   }
 
   /** x and y are fractions (0..1) of the shown image. */

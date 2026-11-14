@@ -71,6 +71,16 @@ export class Adb {
     return this.shell(`su -c ${shellQuote(command)}`, timeoutMs)
   }
 
+  /**
+   * A way to run commands as root: the adb shell itself on images where `adb root` works,
+   * Magisk's su on the Play Store capture phone. Null when the phone is not rooted.
+   */
+  async asRoot(): Promise<((command: string, timeoutMs?: number) => Promise<string>) | null> {
+    if ((await this.shell('id -u').catch(() => '')).trim() === '0') return (c, t) => this.shell(c, t)
+    if ((await this.su('id -u', 10_000).catch(() => '')).trim() === '0') return (c, t) => this.su(c, t)
+    return null
+  }
+
   /** Resolve once `adb devices` no longer lists this serial, in any state. */
   async untilGone(timeoutMs = 30_000): Promise<void> {
     const deadline = Date.now() + timeoutMs
@@ -82,26 +92,7 @@ export class Adb {
     throw new Error(`${this.serial} did not shut down`)
   }
 
-  /** `adb remount`; returns stdout and stderr together, since adb splits its messages across both. */
-  async remount(): Promise<string> {
-    const result = await run(this.adbPath, ['-s', this.serial, 'remount'], { timeout: 120_000 }).catch(
-      (e: { stdout?: string; stderr?: string; message: string }) => ({ stdout: e.stdout ?? '', stderr: e.stderr || e.message }),
-    )
-    return `${result.stdout}\n${result.stderr}`
-  }
 
-  /** Reboot and wait until the phone has finished booting again. */
-  async reboot(timeoutMs = 240_000): Promise<void> {
-    await this.exec(['reboot']).catch(() => undefined)
-    // `wait-for-device` can return before the phone goes down; wait for it to leave first.
-    const down = Date.now() + 60_000
-    while (Date.now() < down) {
-      const booted = await this.shell('getprop sys.boot_completed', 5_000).catch(() => '')
-      if (booted.trim() !== '1') break
-      await new Promise((r) => setTimeout(r, 1000))
-    }
-    await this.waitForBoot(timeoutMs)
-  }
 
   async screenSize(): Promise<{ width: number; height: number }> {
     const out = await this.shell('wm size')

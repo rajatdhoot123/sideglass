@@ -1,7 +1,6 @@
 // Talks to frida-server for the Electron app. Electron's Node ABI does not match
 // the frida prebuild, so this process runs under system Node.
-import { createRequire } from 'node:module'
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,7 +8,6 @@ import readline from 'node:readline'
 import * as frida from 'frida'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const require = createRequire(import.meta.url)
 const sessions = new Map()
 let device = null
 let compiled = null
@@ -20,11 +18,11 @@ let gatePending = null
 let entrySeq = 0
 
 function projectRoot() {
-  try {
-    // .../node_modules/frida-java-bridge/package.json → the app root that contains node_modules.
-    return dirname(dirname(dirname(require.resolve('frida-java-bridge/package.json'))))
-  } catch {
-    return dirname(here)
+  // The nearest folder above this script whose node_modules has frida-java-bridge. Not the
+  // resolved package path: pnpm resolves it inside node_modules/.pnpm, outside the app root.
+  for (let dir = dirname(here); ; dir = dirname(dir)) {
+    if (existsSync(join(dir, 'node_modules', 'frida-java-bridge', 'package.json'))) return dir
+    if (dirname(dir) === dir) return dirname(here)
   }
 }
 
@@ -145,7 +143,8 @@ function isAppUid(uid) {
   return appId >= 10000 && appId <= 19999
 }
 
-const SKIP_NAME = /^(android|system_server|com\.android\.|com\.google\.android\.(gms|gsf|webview|ext\.))/
+// Phone plumbing, never the app under test: hooking the keyboard or launcher only risks crashing them.
+const SKIP_NAME = /^(android|system_server|com\.android\.|com\.google\.android\.(gms|gsf|webview|ext\.|inputmethod\.|apps\.nexuslauncher|permissioncontroller|packageinstaller))/
 
 function wantsHooks(uid, name) {
   return isAppUid(uid) && Boolean(name) && !SKIP_NAME.test(name)
@@ -282,7 +281,27 @@ async function startGate(message) {
     signal.disconnect(onChild)
     throw error
   }
-  gating = { signal, onChild, sessions: attached }
+  const current = { signal, onChild, sessions: attached }
+  gating = current
+  // zygote dies with system_server. When any watched zygote goes, drop the whole gate: the
+  // other session would keep holding new forks paused with nothing left to resume them. Electron
+  // is told, so its next arm attaches again instead of believing hooks are still on.
+  for (const session of attached) {
+    session.detached.connect((reason) => {
+      if (gating !== current) return
+      gating = null
+      signal.disconnect(onChild)
+      for (const other of attached) {
+        if (other === session) continue
+        void Promise.resolve(other.disableChildGating?.())
+          .catch(() => undefined)
+          .then(() => other.detach())
+          .catch(() => undefined)
+      }
+      process.stderr.write(`Stopped watching zygote (${reason})\n`)
+      process.stderr.write(`${JSON.stringify({ sg: 'ungated', reason: String(reason) })}\n`)
+    })
+  }
   return {}
 }
 
@@ -294,6 +313,18 @@ async function ungate() {
   current.signal.disconnect(current.onChild)
   await Promise.all(current.sessions.map((session) => session.disableChildGating?.().catch(() => undefined)))
   await Promise.all(current.sessions.map((session) => session.detach().catch(() => undefined)))
+  return {}
+}
+
+/** A real round trip to frida-server. A cached device from a server that was restarted is dropped. */
+async function ping(message) {
+  if (!message.port) return {}
+  try {
+    await (await remote(message.port)).enumerateProcesses()
+  } catch {
+    device = null
+    await (await remote(message.port)).enumerateProcesses()
+  }
   return {}
 }
 
@@ -312,7 +343,7 @@ async function stopAll() {
 }
 
 async function handle(message) {
-  if (message.cmd === 'ping') return { ok: true }
+  if (message.cmd === 'ping') return { ok: true, ...(await ping(message)) }
   if (message.cmd === 'spawn') return { ok: true, ...(await spawnApp(message)) }
   if (message.cmd === 'gate') return { ok: true, ...(await gate(message)) }
   if (message.cmd === 'ungate') return { ok: true, ...(await ungate()) }
