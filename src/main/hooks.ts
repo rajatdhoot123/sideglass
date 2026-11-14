@@ -76,17 +76,47 @@ export async function ensureDirectAppStarts(adb: Adb, log: (line: string) => voi
   return true
 }
 
+/**
+ * True once the restarted runtime is usable: user 0 unlocked and System UI running.
+ * `sys.boot_completed` is no use here: a zygote restart never resets it, so it reads 1
+ * while system_server is still starting. Attaching Frida to zygote in that window left
+ * zygote stopped and the phone on a black screen.
+ */
+export function runtimeSettled(userDump: string, table: string): boolean {
+  const state = /State:\s*(\S+)/.exec(userDump)?.[1] ?? ''
+  return state === 'RUNNING_UNLOCKED' && namesFromPs(table).includes('com.android.systemui')
+}
+
+/** Kernel run state from `/proc/<pid>/status`: `T`/`t` mean stopped or held by a tracer. */
+export function processStopped(status: string): boolean {
+  const state = /^State:\s*(\S)/m.exec(status)?.[1] ?? ''
+  return state === 'T' || state === 't'
+}
+
 async function waitForFreshZygote(adb: Adb, previousPid: string): Promise<void> {
-  const deadline = Date.now() + 90_000
+  const deadline = Date.now() + 120_000
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 1000))
     const table = await adb.su('ps -A -o PID,NAME').catch(() => '')
     const pid = pidOfName(table, 'zygote64') || pidOfName(table, 'zygote')
     const names = namesFromPs(table)
-    const boot = (await adb.shell('getprop sys.boot_completed').catch(() => '')).trim()
-    if (boot === '1' && pid && pid !== previousPid && !names.includes('usap64') && !names.includes('usap')) return
+    if (!pid || pid === previousPid || names.includes('usap64') || names.includes('usap')) continue
+    const users = await adb.shell('dumpsys user 2>/dev/null | grep -m1 "State:"').catch(() => '')
+    if (runtimeSettled(users, table)) return
   }
   throw new Error('the phone runtime did not come back without its pre-started app pool')
+}
+
+/** Read zygote's run state a few times. A healthy zygote sleeps; a stuck injection leaves it stopped. */
+async function zygoteStuck(adb: Adb): Promise<boolean> {
+  for (let i = 0; i < 3; i++) {
+    await new Promise((r) => setTimeout(r, 1000))
+    const status = await adb
+      .su('cat /proc/$(pidof zygote64 || pidof zygote)/status 2>/dev/null')
+      .catch(() => '')
+    if (!processStopped(status)) return false
+  }
+  return true
 }
 
 /**
@@ -164,6 +194,18 @@ export class Hooks {
     if (!this.enabled) {
       await host.ungate().catch(() => undefined)
       return
+    }
+    // Every app on the phone forks from zygote. If the attach left it stopped, nothing can
+    // open and the screen stays black, so back out rather than report hooks as on.
+    const adb = this.getAdb()
+    if (await zygoteStuck(adb)) {
+      await host.ungate().catch(() => undefined)
+      if (await zygoteStuck(adb)) {
+        // Killing frida-server releases its hold on zygote.
+        await this.stop()
+        await adb.su('kill $(pidof .sgsys) 2>/dev/null; true').catch(() => undefined)
+      }
+      throw new Error('attaching to the phone runtime froze it, so hooks were switched back off. Try turning them on again')
     }
     this.gating = true
     this.message = 'Hooks are on for every app. Tap its icon on the phone. If it is already open, close it once so it starts fresh.'
@@ -342,7 +384,12 @@ class HookHost {
   async stop(): Promise<void> {
     if (!this.child) return
     await this.request({ cmd: 'stop' }, 5_000).catch(() => undefined)
-    this.child.kill()
+    const child = this.child
+    child.kill()
+    // A host stuck inside a native frida call can outlive SIGTERM; never leave one behind.
+    setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    }, 3_000).unref()
     this.child = null
     for (const waiter of this.pending.values()) waiter.reject(new Error('Hook host stopped'))
     this.pending.clear()
