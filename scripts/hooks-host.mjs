@@ -321,6 +321,12 @@ async function handle(message) {
 }
 
 const lines = readline.createInterface({ input: process.stdin })
+// Sideglass closed (or crashed): detach from zygote and exit instead of lingering.
+lines.on('close', () => {
+  const exit = () => process.exit(0)
+  setTimeout(exit, 3_000).unref()
+  stopAll().then(exit, exit)
+})
 lines.on('line', (line) => {
   let message
   try {
