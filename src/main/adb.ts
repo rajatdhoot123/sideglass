@@ -71,6 +71,16 @@ export class Adb {
     return this.shell(`su -c ${shellQuote(command)}`, timeoutMs)
   }
 
+  /**
+   * A way to run commands as root: the adb shell itself on images where `adb root` works,
+   * Magisk's su on the Play Store capture phone. Null when the phone is not rooted.
+   */
+  async asRoot(): Promise<((command: string, timeoutMs?: number) => Promise<string>) | null> {
+    if ((await this.shell('id -u').catch(() => '')).trim() === '0') return (c, t) => this.shell(c, t)
+    if ((await this.su('id -u', 10_000).catch(() => '')).trim() === '0') return (c, t) => this.su(c, t)
+    return null
+  }
+
   /** Resolve once `adb devices` no longer lists this serial, in any state. */
   async untilGone(timeoutMs = 30_000): Promise<void> {
     const deadline = Date.now() + timeoutMs

@@ -1,6 +1,5 @@
 // Talks to frida-server for the Electron app. Electron's Node ABI does not match
 // the frida prebuild, so this runs under system Node.
-import { createRequire } from 'node:module'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -8,16 +7,15 @@ import readline from 'node:readline'
 import * as frida from 'frida'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const require = createRequire(import.meta.url)
 const sessions = []
 let bundle = null
 
 function projectRoot() {
-  try {
-    // .../node_modules/frida-java-bridge/package.json → the app root that contains node_modules.
-    return dirname(dirname(dirname(require.resolve('frida-java-bridge/package.json'))))
-  } catch {
-    return dirname(here)
+  // The nearest folder above this script whose node_modules has frida-java-bridge. Not the
+  // resolved package path: pnpm resolves it inside node_modules/.pnpm, outside the app root.
+  for (let dir = dirname(here); ; dir = dirname(dir)) {
+    if (existsSync(join(dir, 'node_modules', 'frida-java-bridge', 'package.json'))) return dir
+    if (dirname(dir) === dir) return dirname(here)
   }
 }
 

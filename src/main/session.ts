@@ -666,8 +666,7 @@ export class Session extends EventEmitter {
   }
 
   private async startFrida(adb: Adb): Promise<void> {
-    const uid = (await adb.shell('id -u').catch(() => '')).trim()
-    if (uid !== '0') {
+    if (!(await adb.asRoot())) {
       this.log('Certificate unpinning stays off: this phone is not rooted.')
       return
     }

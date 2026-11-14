@@ -215,6 +215,7 @@ class FridaHost {
 export class DeviceFrida {
   private host: FridaHost | null = null
   private serverReady = false
+  private root: ((command: string, timeoutMs?: number) => Promise<string>) | null = null
 
   constructor(
     private readonly adb: Adb,
@@ -223,18 +224,19 @@ export class DeviceFrida {
   ) {}
 
   async start(): Promise<void> {
-    const uid = (await this.adb.shell('id -u')).trim()
-    if (uid !== '0') throw new Error('Frida needs root on the phone')
+    const root = await this.adb.asRoot()
+    if (!root) throw new Error('Frida needs root on the phone')
+    this.root = root
     const abi = (await this.adb.shell('getprop ro.product.cpu.abi')).trim()
     const arch = fridaArch(abi)
     if (!arch) throw new Error(`No frida-server build for CPU ${abi || 'unknown'}`)
     const binary = await serverBinary(this.cacheDir, arch)
     await this.adb.exec(['push', binary, SERVER_PATH], 120_000)
-    await this.adb.shell(`chmod 755 ${SERVER_PATH}`)
-    const running = (await this.adb.shell('pidof frida-server').catch(() => '')).trim()
+    await root(`chmod 755 ${SERVER_PATH}`)
+    const running = (await root('pidof frida-server').catch(() => '')).trim()
     if (running) {
       // The process keeps the old binary after the file is replaced. Start the one just pushed.
-      await this.adb.shell(`kill ${running.split(/\s+/).filter((pid) => /^\d+$/.test(pid)).join(' ')}`).catch(() => undefined)
+      await root(`kill ${running.split(/\s+/).filter((pid) => /^\d+$/.test(pid)).join(' ')}`).catch(() => undefined)
     }
     await this.launchServer()
     const version = (await this.adb.shell(`${SERVER_PATH} --version`).catch(() => '')).trim()
@@ -254,12 +256,22 @@ export class DeviceFrida {
     await this.host?.stop()
     this.host = null
     this.serverReady = false
-    const pids = (await this.adb.shell('pidof frida-server').catch(() => '')).trim()
-    if (pids) await this.adb.shell(`kill ${pids.split(/\s+/).join(' ')}`).catch(() => undefined)
+    const root = this.root ?? (await this.adb.asRoot().catch(() => null))
+    if (!root) return
+    const pids = (await root('pidof frida-server').catch(() => '')).trim()
+    if (pids) await root(`kill ${pids.split(/\s+/).filter((pid) => /^\d+$/.test(pid)).join(' ')}`).catch(() => undefined)
   }
 
   /** `-D` daemonizes. If adb still holds the shell, the pid check is what matters. */
   private async launchServer(): Promise<void> {
+    const root = this.root!
+    if ((await this.adb.shell('id -u').catch(() => '')).trim() !== '0') {
+      // Magisk phone: only su is root, so start the server through it.
+      await root(`nohup ${SERVER_PATH} -D >/dev/null 2>&1 &`, 15_000).catch(() => undefined)
+      await new Promise((r) => setTimeout(r, 2_000))
+      if (!(await root('pidof frida-server').catch(() => '')).trim()) throw new Error('frida-server did not stay running')
+      return
+    }
     const child = this.adb.spawn(['shell', SERVER_PATH, '-D'])
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 4_000)
