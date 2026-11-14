@@ -28,6 +28,8 @@ export interface WatcherConfig {
 export interface WatcherStatus {
   url: string
   hasToken: boolean
+  /** False when the OS keychain is unavailable and the token is saved as plain text (mode 0600). */
+  encrypted: boolean
 }
 
 export interface WatchOptions {
@@ -39,6 +41,14 @@ export interface WatchOptions {
 export interface WatchCreated {
   id: string
   name: string
+}
+
+interface WatcherFeed {
+  changes: WatcherChange[]
+  latest: number
+  /** Where the next poll starts. Behind `latest` when `more` is set. */
+  cursor?: number
+  more?: boolean
 }
 
 export interface WatcherChange {
@@ -161,6 +171,9 @@ async function call<T>(config: WatcherConfig, path: string, init: RequestInit = 
     response = await fetcher(`${config.url}${path}`, {
       ...init,
       headers: { authorization: `Bearer ${config.token}`, ...(init.body ? { 'content-type': 'application/json' } : {}) },
+      // The worker never redirects /v1. Following one would send the captured headers and body
+      // (and the token, for a same-origin hop) somewhere else.
+      redirect: 'error',
       signal: AbortSignal.timeout(30_000),
     })
   } catch (error) {
@@ -245,17 +258,19 @@ export class ChangePoller {
     this.busy = true
     const generation = this.generation
     try {
-      const path = this.since === null ? '' : `since=${this.since}&`
-      const feed = await call<{ changes: WatcherChange[]; latest: number }>(config, `/v1/changes?${path}limit=50`, {}, this.fetcher)
-      if (generation !== this.generation) return
-      // First poll, or the feed restarted (new worker, all watches deleted): take its end.
-      if (this.since === null || feed.latest < this.since) {
-        this.since = feed.latest
-        return
-      }
-      for (const change of feed.changes) {
-        this.notify(change)
-        this.since = change.seq
+      for (let page = 0; page < 10; page++) {
+        const path = this.since === null ? '' : `since=${this.since}&`
+        const feed = await call<WatcherFeed>(config, `/v1/changes?${path}limit=50`, {}, this.fetcher)
+        if (generation !== this.generation) return
+        // First poll, or the feed restarted (new worker, all watches deleted): take its end.
+        if (this.since === null || feed.latest < this.since) {
+          this.since = feed.latest
+          return
+        }
+        for (const change of feed.changes) this.notify(change)
+        // A page cut at the limit stops short of the tip: `cursor` is where it stopped.
+        this.since = feed.cursor ?? feed.changes.at(-1)?.seq ?? this.since
+        if (!feed.more) return
       }
     } catch {
       // The watcher is a convenience: an outage must not bother the capture window.

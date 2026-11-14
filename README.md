@@ -54,7 +54,8 @@ left; the phone is on the right, and you click and drag on it to use it.
   with its captured headers and keeps a diff each time the response changes, also while Sideglass is
   closed. Ignore volatile JSON keys such as `timestamp`. **Watchers** opens its dashboard in a window,
   and each change shows a desktop notification while Sideglass is open. Right-click **Watchers** to set
-  its URL and token (the token is kept in the OS keychain).
+  its URL and token. The token is encrypted with the OS keychain; where none is available (some
+  Linux setups) it is saved as plain text readable only by your user, and the setup panel says so.
 - **Saved sessions:** captures are kept in a local SQLite file. Search them, open one, or open
   a HAR file.
 - **Code:** decompile an installed app with [jadx](https://github.com/skylot/jadx) (Apache-2.0, downloaded on

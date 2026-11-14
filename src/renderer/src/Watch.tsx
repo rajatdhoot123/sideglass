@@ -52,6 +52,11 @@ export function WatcherSetup({ status, onSaved }: { status: WatcherStatus; onSav
           onKeyDown={(e) => e.key === 'Enter' && void save()}
         />
       </label>
+      {!status.encrypted && (
+        <p className="muted small">
+          This system has no keychain available, so the token is saved as plain text in Sideglass's data folder, readable only by your user.
+        </p>
+      )}
       {error && <p className="save-error">{error}</p>}
       <div className="save-actions">
         <button type="button" className="primary" disabled={busy || !url.trim()} onClick={() => void save()}>

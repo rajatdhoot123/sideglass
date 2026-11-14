@@ -344,7 +344,7 @@ const requireWatcher = (): WatcherConfig => {
 }
 const watcherStatus = (): WatcherStatus => {
   const config = currentWatcher()
-  return { url: config?.url ?? '', hasToken: Boolean(config?.token) }
+  return { url: config?.url ?? '', hasToken: Boolean(config?.token), encrypted: tokenCipher.available() }
 }
 let dashboard: BrowserWindow | null = null
 let dashboardOrigin = ''
@@ -360,7 +360,8 @@ function openDashboard(watchId?: string): void {
     dashboard = null
   }
   if (dashboard && !dashboard.isDestroyed()) {
-    void dashboard.loadURL(target)
+    // A failed load would log the URL, and the URL carries the token in its fragment.
+    dashboard.loadURL(target).catch(() => undefined)
     dashboard.show()
     dashboard.focus()
     return
@@ -376,23 +377,56 @@ function openDashboard(watchId?: string): void {
   })
   dashboard = opened
   dashboardOrigin = origin
-  opened.webContents.on('will-navigate', (event, url) => {
-    if (new URL(url).origin !== origin) event.preventDefault()
+  // The page holds the token, so it may only ever show the watcher's own origin: every
+  // navigation, redirect and frame navigation is checked, and a bad URL counts as foreign.
+  const sameOrigin = (url: string) => {
+    try {
+      return new URL(url).origin === origin
+    } catch {
+      return false
+    }
+  }
+  const guard = (event: { preventDefault(): void }, url: string) => {
+    if (!sameOrigin(url)) event.preventDefault()
+  }
+  opened.webContents.on('will-navigate', (event, url) => guard(event, url))
+  opened.webContents.on('will-redirect', (event, url) => guard(event, url))
+  opened.webContents.on('will-frame-navigate', (event) => guard(event, event.url))
+  // loadURL fires none of the above; if anything still lands elsewhere, close the window.
+  const leftOrigin = () => {
+    if (!opened.isDestroyed() && !sameOrigin(opened.webContents.getURL())) opened.destroy()
+  }
+  opened.webContents.on('did-navigate', leftOrigin)
+  opened.webContents.on('did-redirect-navigation', (_event, url) => {
+    if (!sameOrigin(url)) opened.destroy()
   })
   opened.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//.test(url)) void shell.openExternal(url)
+    try {
+      const external = new URL(url)
+      if (external.protocol === 'http:' || external.protocol === 'https:') {
+        // Never hand the token on: drop a fragment that carries it.
+        if (external.hash.includes('token')) external.hash = ''
+        void shell.openExternal(external.toString())
+      }
+    } catch {
+      // Not a URL: nothing to open.
+    }
     return { action: 'deny' }
   })
   opened.on('closed', () => {
     if (dashboard === opened) dashboard = null
   })
-  void opened.loadURL(target)
+  opened.loadURL(target).catch(() => undefined)
 }
 
 const changePoller = new ChangePoller(currentWatcher, (change) => {
   if (!Notification.isSupported()) return
   const notification = new Notification({ title: `Changed: ${change.name}`, body: changeMessage(change) })
+  // The change belongs to the watcher configured now; a click after the URL changed must not
+  // open the new watcher at an old watch id.
+  const origin = currentWatcher()?.url
   notification.on('click', () => {
+    if (!origin || currentWatcher()?.url !== origin) return
     try {
       openDashboard(change.watchId)
     } catch {

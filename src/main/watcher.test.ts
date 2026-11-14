@@ -178,3 +178,33 @@ test('a reset while a poll is out drops that poll and starts from the new feed e
   // After the reset it learned B's end (40), not A's (5).
   assert.ok(asked.at(-1)?.startsWith('https://b.example/v1/changes?since=40'), asked.join(' '))
 })
+
+test('poller pages through a burst instead of skipping to the tip', async () => {
+  const all = Array.from({ length: 80 }, (_, i): WatcherChange => ({ seq: i + 11, watchId: 'w', name: 'n', changeId: i, at: 0, added: 1, removed: 0, statusBefore: 200, statusAfter: 200 }))
+  let feed: WatcherChange[] = []
+  const fetcher = (async (url: string) => {
+    const since = new URL(url).searchParams.get('since')
+    const latest = feed.at(-1)?.seq ?? 10
+    if (since === null) return new Response(JSON.stringify({ changes: [], cursor: latest, latest, more: false }))
+    const changes = feed.filter((c) => c.seq > Number(since)).slice(0, 50)
+    const cursor = changes.length >= 50 ? (changes.at(-1)?.seq ?? latest) : latest
+    return new Response(JSON.stringify({ changes, cursor, latest, more: cursor < latest }))
+  }) as typeof fetch
+  const seen: number[] = []
+  const poller = new ChangePoller(() => ({ url: 'https://w.example.com', token: 't' }), (c) => seen.push(c.seq), 60_000, fetcher)
+  await poller.poll()
+  feed = all
+  await poller.poll()
+  assert.equal(seen.length, 80)
+  assert.deepEqual(seen, all.map((c) => c.seq))
+})
+
+test('watcher calls refuse redirects', async () => {
+  let redirect: RequestRedirect | undefined
+  const fetcher = (async (_url: string, init: RequestInit) => {
+    redirect = init.redirect
+    return new Response(JSON.stringify({ watch: { id: 'w_1', name: 'P' } }), { status: 201 })
+  }) as typeof fetch
+  await createWatch({ url: 'https://w.example.com', token: 'tk' }, exchange(), parseWatchOptions({ name: 'P', every: { value: 1, unit: 'hr' } }), fetcher)
+  assert.equal(redirect, 'error')
+})
