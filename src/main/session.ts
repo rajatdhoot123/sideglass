@@ -571,7 +571,16 @@ export class Session extends EventEmitter {
       return restarted
     } catch (error) {
       if (restarted && this.ca) await this.trust(adb, this.ca).catch(() => undefined)
-      this.log(`Opening an app from its icon will not inject hooks (${(error as Error).message}). The launch list still tries.`)
+      const reason = error instanceof Error ? error.message : 'icon hooks did not start'
+      // The switch reads this flag, not Hooks.enabled. Leave it on and the next
+      // hooksState() poll turns the button back on over a failed arm.
+      this.hooksEnabled = false
+      const hooks = this.getHooks()
+      hooks.enabled = false
+      hooks.gating = false
+      hooks.message = reason
+      this.emit('hooks-state', this.hooksState())
+      this.log(`Icon hooks are off: ${reason}`)
       return restarted
     } finally {
       // This restart was ours: the next check takes the new system_server as its baseline.
