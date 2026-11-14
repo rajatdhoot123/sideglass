@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Exchange, ExchangeSummary, ProxyRule, SavedSession, SaveFormat, SaveLayout } from '../../shared'
 import { toCurl } from '../../main/curl'
 import { codeQueryFor } from './codequery'
+import { WatchPanel } from './Watch'
 import { FILTER_KEYS, parseFilter, RESOURCE_TYPES, resourceType, TYPE_LABELS, type ResourceType } from './netfilter'
 
 const size = (n?: number) => (n === undefined ? '' : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} kB` : `${(n / 1048576).toFixed(1)} MB`)
@@ -115,6 +116,7 @@ export function Requests({
   const [sessionId, setSessionId] = useState('')
   const [rules, setRules] = useState<ProxyRule[]>([])
   const [editing, setEditing] = useState(false)
+  const [watching, setWatching] = useState(false)
   const [editUrl, setEditUrl] = useState('')
   const [editMethod, setEditMethod] = useState('GET')
   const [editBody, setEditBody] = useState('')
@@ -429,6 +431,13 @@ export function Requests({
             </button>
             <button onClick={() => void window.api.replay(detail.id).catch((error: Error) => setDecoded(error.message))}>Replay</button>
             <button
+              className={watching ? 'on' : ''}
+              title="Re-send this request every few seconds, minutes, hours or days and see a diff when the response changes"
+              onClick={() => setWatching((open) => !open)}
+            >
+              Watch…
+            </button>
+            <button
               title="Search the app's decompiled code for this endpoint"
               onClick={() => onFindInCode(detail.app ?? (focusApp && focusApp !== '__all__' ? focusApp : null), codeQueryFor(detail.url))}
             >
@@ -463,6 +472,7 @@ export function Requests({
             </button>
             <input aria-label="Mock body" value={mockBody} onChange={(e) => setMockBody(e.target.value)} />
           </div>
+          {watching && <WatchPanel detail={detail} onClose={() => setWatching(false)} />}
           {editing && (
             <div className="detail-edit">
               <input aria-label="Replay method" value={editMethod} onChange={(e) => setEditMethod(e.target.value)} />

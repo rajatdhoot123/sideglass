@@ -49,6 +49,13 @@ left; the phone is on the right, and you click and drag on it to use it.
   Sideglass's own unpinning script.
 - **Requests tools:** copy as cURL, replay, edit and replay, block a URL, or answer it with a
   mock body. Load a `.proto` to decode a protobuf or gRPC body with a schema.
+- **Watch an API:** **Watch…** on a request hands it to an API Watcher service (a small Cloudflare
+  Worker you deploy) with an interval, every N seconds, minutes, hours or days. It re-sends the request
+  with its captured headers and keeps a diff each time the response changes, also while Sideglass is
+  closed. Ignore volatile JSON keys such as `timestamp`. **Watchers** opens its dashboard in a window,
+  and each change shows a desktop notification while Sideglass is open. Right-click **Watchers** to set
+  its URL and token. The token is encrypted with the OS keychain; where none is available (some
+  Linux setups) it is saved as plain text readable only by your user, and the setup panel says so.
 - **Saved sessions:** captures are kept in a local SQLite file. Search them, open one, or open
   a HAR file.
 - **Code:** decompile an installed app with [jadx](https://github.com/skylot/jadx) (Apache-2.0, downloaded on
