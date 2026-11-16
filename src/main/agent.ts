@@ -16,8 +16,158 @@
  *      faked from the client; that limit is by design, not a bug.
  */
 
+// Native maps/status filter. JavaScript listeners on open() and read() run on the
+// linker thread while a library loads, which SIGSEGV'd React Native at
+// libreactnative.so. read() stays unhooked. open() of /proc/self/maps and
+// /proc/self/status is swapped for a scrubbed snapshot; every other open returns
+// immediately, still in native code.
+const MAPS_FILTER_C = `#include <gum/guminterceptor.h>
+
+#define SNAP_MAX 2097152
+
+static const char *WORDS[] = {
+  "frida", "xposed", "magisk", "zygisk", "linjector", "gadget"
+};
+static const int WLEN[] = { 5, 6, 6, 6, 9, 6 };
+
+extern long sg_read(int fd, void *buf, unsigned long count);
+extern long sg_write(int fd, const void *buf, unsigned long count);
+extern int sg_close(int fd);
+extern long sg_lseek(int fd, long offset, int whence);
+extern int sg_memfd(const char *name, unsigned int flags);
+
+static int lower(int c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A' + 'a';
+  return c;
+}
+
+static void scrub(char *buf, long n) {
+  long i;
+  int w;
+  if (n <= 0) return;
+  for (i = 0; i < n; i++) {
+    for (w = 0; w < 6; w++) {
+      int len = WLEN[w];
+      int j;
+      int match;
+      if (i + len > n) continue;
+      match = 1;
+      for (j = 0; j < len; j++) {
+        if (lower((unsigned char) buf[i + j]) != WORDS[w][j]) {
+          match = 0;
+          break;
+        }
+      }
+      if (!match) continue;
+      for (j = 0; j < len; j++) buf[i + j] = ' ';
+      i += len - 1;
+      break;
+    }
+  }
+}
+
+static int path_ok(const void *p) {
+  unsigned long long v = (unsigned long long) (unsigned long) p;
+  if (v < 0x10000ULL) return 0;
+  if (v > 0x00FFFFFFFFFFFFFFULL) return 0;
+  return 1;
+}
+
+static int ends_with(const char *s, const char *suf) {
+  int n = 0;
+  int m = 0;
+  int i;
+  while (s[n] != 0) n++;
+  while (suf[m] != 0) m++;
+  if (n < m) return 0;
+  for (i = 0; i < m; i++) if (s[n - m + i] != suf[i]) return 0;
+  return 1;
+}
+
+static int proc_self(const void *path) {
+  const char *p = (const char *) path;
+  char tmp[96];
+  int i;
+  if (!path_ok(path)) return 0;
+  for (i = 0; i < 95; i++) {
+    tmp[i] = p[i];
+    if (tmp[i] == 0) {
+      return ends_with(tmp, "/proc/self/maps") || ends_with(tmp, "/proc/self/status");
+    }
+  }
+  return 0;
+}
+
+typedef struct _SgCall {
+  int hit;
+} SgCall;
+
+static void swap_snapshot(GumInvocationContext *ic) {
+  int fd = (int) (long) gum_invocation_context_get_return_value(ic);
+  int mfd;
+  char buf[4096];
+  long total = 0;
+  long n;
+  long off;
+  if (fd < 0) return;
+  mfd = sg_memfd("sg", 0);
+  if (mfd < 0) return;
+  for (;;) {
+    n = sg_read(fd, buf, sizeof(buf));
+    if (n < 0) goto fail;
+    if (n == 0) break;
+    total += n;
+    if (total > SNAP_MAX) goto fail;
+    scrub(buf, n);
+    off = 0;
+    while (off < n) {
+      long w = sg_write(mfd, buf + off, (unsigned long) (n - off));
+      if (w <= 0) goto fail;
+      off += w;
+    }
+  }
+  if (sg_lseek(mfd, 0, 0) < 0) goto fail;
+  sg_close(fd);
+  gum_invocation_context_replace_return_value(ic, (gpointer) (gsize) mfd);
+  return;
+fail:
+  sg_close(mfd);
+}
+
+void onEnter(GumInvocationContext *ic) {
+  SgCall *c = gum_invocation_context_get_listener_invocation_data(ic, sizeof(SgCall));
+  int tag = (int) (gsize) gum_invocation_context_get_listener_function_data(ic);
+  const void *path;
+  if (c == 0) return;
+  path = gum_invocation_context_get_nth_argument(ic, tag == 2 ? 1 : 0);
+  c->hit = proc_self(path);
+}
+
+void onLeave(GumInvocationContext *ic) {
+  SgCall *c = gum_invocation_context_get_listener_invocation_data(ic, sizeof(SgCall));
+  if (c != 0 && c->hit) swap_snapshot(ic);
+}
+
+int sg_scrub_ok(void) {
+  char a[6];
+  int i;
+  a[0] = 'F';
+  a[1] = 'r';
+  a[2] = 'i';
+  a[3] = 'd';
+  a[4] = 'a';
+  a[5] = 'Z';
+  scrub(a, 5);
+  if (a[5] != 'Z') return 0;
+  for (i = 0; i < 5; i++) if (a[i] != ' ') return 0;
+  return 1;
+}
+`
+
 export const AGENT_SOURCE = String.raw`
 'use strict'
+
+var MAPS_FILTER_C = ${JSON.stringify(MAPS_FILTER_C)}
 
 function sgLog(level, text) { send({ sg: 'log', level: level, text: String(text) }) }
 function sgTry(name, fn) {
@@ -214,70 +364,50 @@ function hookNative() {
     if (p === null) throw new Error('symbol not found')
     Interceptor.replace(p, pin(new NativeCallback(function () { return 0 }, 'long', ['pointer'])))
   })
-  // strstr runs on every C string search and re-enters JS on the app thread. Only scrub maps and status reads.
-  sgTry('native maps scan filter', function () {
-    var readFn = globalExport('read')
-    if (readFn === null) throw new Error('symbol not found')
-    var watched = {}
-    function attachOpen(name, pathArg) {
-      var exp = globalExport(name)
-      if (exp === null) return
-      var listener = {
-        onEnter: function (args) {
-          this.hit = false
-          try {
-            var path = args[pathArg].readCString()
-            this.hit = path !== null && /\/proc\/self\/(maps|status)$/.test(path)
-          } catch (e) {}
-        },
-        onLeave: function (ret) {
-          var fd = ret.toInt32()
-          if (this.hit && fd >= 0) watched[fd] = true
-        },
-      }
-      pin(listener)
-      Interceptor.attach(exp, listener)
+}
+
+var mapsInstalled = false
+var mapsWanted = false
+
+function installMapsFilter(finalAttempt) {
+  if (mapsInstalled) return
+  try {
+    var openAddr = globalExport('open')
+    var openatAddr = globalExport('openat')
+    var readAddr = globalExport('read')
+    var writeAddr = globalExport('write')
+    var closeAddr = globalExport('close')
+    var lseekAddr = globalExport('lseek')
+    var memfdAddr = globalExport('memfd_create')
+    if ((openAddr === null && openatAddr === null) || readAddr === null || writeAddr === null || closeAddr === null || lseekAddr === null || memfdAddr === null) {
+      throw new Error('libc symbols missing')
     }
-    attachOpen('open', 0)
-    attachOpen('openat', 1)
-    var closeFn = globalExport('close')
-    if (closeFn !== null) {
-      var closeListener = {
-        onEnter: function (args) { this.fd = args[0].toInt32() },
-        onLeave: function (ret) { if (ret.toInt32() === 0) delete watched[this.fd] },
-      }
-      pin(closeListener)
-      Interceptor.attach(closeFn, closeListener)
+    var cm = new CModule(MAPS_FILTER_C, {
+      sg_read: readAddr,
+      sg_write: writeAddr,
+      sg_close: closeAddr,
+      sg_lseek: lseekAddr,
+      sg_memfd: memfdAddr,
+    })
+    pin(cm)
+    var scrubOk = new NativeFunction(cm.sg_scrub_ok, 'int', [])
+    if (scrubOk() !== 1) throw new Error('scrub failed')
+    var armed = {}
+    function arm(addr, tag) {
+      if (addr === null) return
+      var key = addr.toString()
+      if (armed[key]) return
+      armed[key] = true
+      pin(Interceptor.attach(addr, cm, tag))
     }
-    var readListener = {
-      onEnter: function (args) {
-        this.fd = args[0].toInt32()
-        this.buf = args[1]
-      },
-      onLeave: function (ret) {
-        var n = ret.toInt32()
-        if (n <= 0 || watched[this.fd] !== true) return
-        try {
-          var raw = this.buf.readByteArray(n)
-          if (raw === null) return
-          var bytes = new Uint8Array(raw)
-          var text = ''
-          for (var i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i])
-          var cleaned = text.replace(/frida|xposed|magisk|zygisk|linjector|gadget/ig, function (match) {
-            var blank = ''
-            for (var c = 0; c < match.length; c++) blank += ' '
-            return blank
-          })
-          if (cleaned === text || cleaned.length !== n) return
-          var out = []
-          for (var j = 0; j < n; j++) out.push(cleaned.charCodeAt(j) & 0xff)
-          this.buf.writeByteArray(out)
-        } catch (e) {}
-      },
-    }
-    pin(readListener)
-    Interceptor.attach(readFn, readListener)
-  })
+    // openat first. On Android it is the call the linker and libc actually make.
+    arm(openatAddr, ptr(2))
+    arm(openAddr, ptr(1))
+    mapsInstalled = true
+    sgLog('debug', 'native maps scan filter ok')
+  } catch (e) {
+    if (finalAttempt) sgLog('warn', 'native maps scan filter skipped (' + e + ')')
+  }
 }
 
 /* --- TLS libraries bundled inside the app (cronet, conscrypt, a private BoringSSL, Flutter) ---
@@ -657,6 +787,12 @@ rpc.exports = {
   prepare: function (options) {
     var pkg = options && options.pkg ? String(options.pkg) : ''
     if (options && options.running) running = true
+    // Spawn is still paused here, so this lands before the app loads native libraries.
+    // A zygote child is already running; the filter still does not hook read().
+    if (!skipPackage(pkg)) {
+      mapsWanted = true
+      installMapsFilter(!!(options && options.running))
+    }
     if (typeof Java === 'undefined' || !Java.available) {
       if (skipPackage(pkg)) return true
       sgLog('warn', 'no Java runtime; only native hooks applied')
@@ -669,6 +805,7 @@ rpc.exports = {
   },
   started: function () {
     running = true
+    if (mapsWanted) installMapsFilter(true)
     runNative()
     return true
   },
