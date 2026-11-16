@@ -18,8 +18,9 @@
 
 // Native maps/status filter. JavaScript listeners on open() and read() run on the
 // linker thread while a library loads, which SIGSEGV'd React Native at
-// libreactnative.so. read() stays unhooked. open() of /proc/self/maps and
-// /proc/self/status is swapped for a scrubbed snapshot; every other open returns
+// libreactnative.so. read() stays unhooked. open() and openat() — including the
+// _FORTIFY_SOURCE variants __open_2 and __openat_2 — of /proc/self/maps and
+// /proc/self/status are swapped for a scrubbed snapshot; every other open returns
 // immediately, still in native code.
 const MAPS_FILTER_C = `#include <gum/guminterceptor.h>
 
@@ -403,6 +404,11 @@ function installMapsFilter(finalAttempt) {
     // openat first. On Android it is the call the linker and libc actually make.
     arm(openatAddr, ptr(2))
     arm(openAddr, ptr(1))
+    // _FORTIFY_SOURCE builds turn 2-arg open(path, flags) into __open_2 and 3-arg
+    // openat(fd, path, flags) into __openat_2; both call the hidden __openat syscall,
+    // never the public symbols above. Same argument layout, so the same tags apply.
+    arm(globalExport('__openat_2'), ptr(2))
+    arm(globalExport('__open_2'), ptr(1))
     mapsInstalled = true
     sgLog('debug', 'native maps scan filter ok')
   } catch (e) {

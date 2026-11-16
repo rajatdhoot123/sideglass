@@ -64,6 +64,8 @@ test('proc maps are filtered in native code and read() stays unhooked', () => {
     assert.ok(AGENT_SOURCE.includes(word), word)
   }
   assert.equal(AGENT_SOURCE.includes('readByteArray'), false)
+  assert.match(AGENT_SOURCE, /arm\(globalExport\('__openat_2'\), ptr\(2\)\)/)
+  assert.match(AGENT_SOURCE, /arm\(globalExport\('__open_2'\), ptr\(1\)\)/)
   assert.match(AGENT_SOURCE, /if \(!skipPackage\(pkg\)\) \{/)
   assert.match(AGENT_SOURCE, /installMapsFilter\(!!\(options && options\.running\)\)/)
   assert.match(AGENT_SOURCE, /if \(mapsWanted\) installMapsFilter\(true\)/)
