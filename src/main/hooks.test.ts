@@ -54,3 +54,23 @@ test('the hooks agent does not touch Java until the host calls prepare', () => {
   assert.match(AGENT_SOURCE, /started: function/)
   assert.equal(AGENT_SOURCE.includes('\nhookNative()\n'), false)
 })
+
+test('proc maps are filtered in native code and read() stays unhooked', () => {
+  assert.match(AGENT_SOURCE, /new CModule\(MAPS_FILTER_C/)
+  assert.match(AGENT_SOURCE, /memfd_create/)
+  assert.match(AGENT_SOURCE, /\/proc\/self\/maps/)
+  assert.match(AGENT_SOURCE, /\/proc\/self\/status/)
+  for (const word of ['linjector', 'gadget', 'zygisk']) {
+    assert.ok(AGENT_SOURCE.includes(word), word)
+  }
+  assert.equal(AGENT_SOURCE.includes('readByteArray'), false)
+  assert.match(AGENT_SOURCE, /arm\(globalExport\('__openat_2'\), ptr\(2\)\)/)
+  assert.match(AGENT_SOURCE, /arm\(globalExport\('__open_2'\), ptr\(1\)\)/)
+  assert.match(AGENT_SOURCE, /if \(!skipPackage\(pkg\)\) \{/)
+  assert.match(AGENT_SOURCE, /installMapsFilter\(!!\(options && options\.running\)\)/)
+  assert.match(AGENT_SOURCE, /if \(mapsWanted\) installMapsFilter\(true\)/)
+  const prepareAt = AGENT_SOURCE.indexOf('prepare: function')
+  const prepareBody = AGENT_SOURCE.slice(prepareAt, AGENT_SOURCE.indexOf('started: function'))
+  assert.ok(prepareBody.indexOf('installMapsFilter') !== -1)
+  assert.ok(prepareBody.indexOf('installMapsFilter') < prepareBody.indexOf('queueJava(function'))
+})

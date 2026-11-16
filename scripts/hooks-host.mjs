@@ -185,10 +185,12 @@ async function spawnApp(message) {
     const script = await session.createScript(source)
     watchScript(script, message.pkg)
     await script.load()
-    // Spawn pauses before the app runs, so the Java hooks are queued first.
+    // Spawn pauses before the app runs. prepare() installs the maps filter and queues
+    // Java hooks before the app loads native libraries.
     await callExport(script, 'prepare', { pkg: message.pkg, running: false })
     await dev.resume(pid)
-    // Native hooks wait for the process to run: patching them while paused crashed Flutter.
+    // Bundled TLS patches wait until the process is running. Patching them while
+    // paused crashed Flutter as its raster thread loaded the emulator GLES driver.
     await callExport(script, 'started').catch(() => undefined)
     const prior = sessions.get(message.pkg)
     track(message.pkg, session, script)
