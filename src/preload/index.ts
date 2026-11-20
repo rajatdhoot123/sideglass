@@ -63,6 +63,9 @@ contextBridge.exposeInMainWorld('api', {
   configureWatcher: invoke('watcher:configure'),
   watch: invoke('watcher:watch'),
   openWatcher: invoke('watcher:open'),
+  recordingState: invoke('record:state'),
+  startRecording: invoke('record:start'),
+  stopRecording: invoke('record:stop'),
   on: (channel: string, cb: (...args: unknown[]) => void) => {
     const listener = (_: unknown, ...args: unknown[]) => cb(...args)
     ipcRenderer.on(channel, listener)

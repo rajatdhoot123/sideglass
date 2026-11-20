@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFile, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, Notification, safeStorage, shell } from 'electron'
@@ -10,6 +11,7 @@ import { toHar } from './har'
 import { publicExchange } from './proxy'
 import { appendLog, installQuietLog } from './quiet'
 import { Batcher } from './batch'
+import { recordingName } from './recorder'
 import { Session } from './session'
 import { loadSettings, saveSettings } from './settings'
 import { findSdk, sdkAt } from './sdk'
@@ -274,6 +276,27 @@ ipcMain.handle('code:export', async (_, pkg: string) => {
   const count = await current.exportCode(pkg, folder)
   shell.showItemInFolder(folder)
   return { path: folder, count }
+})
+ipcMain.handle('record:state', () => session?.recordingState() ?? null)
+ipcMain.handle('record:start', () => requireSession().startRecording())
+ipcMain.handle('record:stop', async () => {
+  const current = requireSession()
+  const extension = current.recordingState()?.extension ?? 'webm'
+  const file = await current.stopRecording()
+  try {
+    const target = await dialog.showSaveDialog({
+      title: 'Save the screen recording',
+      defaultPath: join(app.getPath('videos'), recordingName(new Date(), extension)),
+      filters: [{ name: extension === 'webm' ? 'WebM video' : 'MP4 video', extensions: [extension] }],
+    })
+    if (target.canceled || !target.filePath) return null
+    // copy, not rename: the temporary folder may be on another disk.
+    await copyFile(file, target.filePath)
+    shell.showItemInFolder(target.filePath)
+    return { path: target.filePath }
+  } finally {
+    await rm(file, { force: true }).catch(() => undefined)
+  }
 })
 ipcMain.handle('sms:send', (_, device: Device, from: string, text: string) => requireSession().sendSms(device, from, text))
 ipcMain.handle('har:export', async () => {
