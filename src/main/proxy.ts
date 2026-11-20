@@ -57,6 +57,33 @@ export function publicExchange(exchange: Exchange): Omit<Exchange, 'requestBytes
 
 const MAX_EXCHANGES = 5000
 
+/**
+ * User-Agent sent upstream in place of a browser one. The upstream socket is Node's TLS stack.
+ * Cloudflare treats that fingerprint plus a Chrome or WebView User-Agent as a bot and answers
+ * with the "you have been blocked" page. The same app's OkHttp calls, which already use this
+ * value, reach the real API.
+ */
+const UPSTREAM_USER_AGENT = 'okhttp/4.12.0'
+
+function browserUserAgent(value: string): boolean {
+  return /Mozilla\/|AppleWebKit|Chrome\/|Safari\/|Firefox\/|Edg\//.test(value)
+}
+
+/** Headers to forward. Drops the app tag and replaces a browser User-Agent. The capture keeps both originals. */
+export function forwardHeaders(
+  headers: Record<string, string | string[] | undefined>,
+): Record<string, string | string[] | undefined> {
+  const copy = { ...headers }
+  takeAppHeader(copy)
+  for (const name of Object.keys(copy)) {
+    if (name.toLowerCase() !== 'user-agent') continue
+    const value = copy[name]
+    const text = Array.isArray(value) ? value.join(' ') : value
+    if (text && browserUserAgent(text)) copy[name] = UPSTREAM_USER_AGENT
+  }
+  return copy
+}
+
 async function bodyText(
   body: { getDecodedBuffer(): Promise<Buffer | undefined>; buffer: Buffer },
   contentType: string,
@@ -117,11 +144,6 @@ export class CaptureProxy extends EventEmitter {
         )
       throw error
     }
-    const stripAppHeader = (headers: Record<string, string | string[] | undefined>) => {
-      const copy = { ...headers }
-      takeAppHeader(copy)
-      return copy
-    }
     await server.forAnyRequest().matching((req) => findRule(this.rules, req.url) !== undefined).thenCallback((req) => {
       const rule = findRule(this.rules, req.url)
       if (!rule || rule.kind === 'block') return { statusCode: 403, statusMessage: 'Blocked', body: 'Blocked by Sideglass' }
@@ -133,7 +155,7 @@ export class CaptureProxy extends EventEmitter {
     })
     await server.forUnmatchedRequest().thenPassThrough({
       ignoreHostHttpsErrors: false,
-      beforeRequest: (req) => ({ headers: stripAppHeader(req.headers) }),
+      beforeRequest: (req) => ({ headers: forwardHeaders(req.headers) }),
     })
     await server.forAnyWebSocket().thenPassThrough()
 
