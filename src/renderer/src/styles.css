@@ -59,6 +59,7 @@ button:hover { border-color: var(--accent); }
 .tabs { overflow-x: auto; scrollbar-width: none; }
 .tabs > button { white-space: nowrap; flex-shrink: 0; }
 .tabs button.on, .subtabs button.on { border-color: var(--accent); color: var(--accent); }
+button.recording { border-color: #e5484d; color: #e5484d; font-variant-numeric: tabular-nums; }
 .spacer { flex: 1; }
 .count { display: inline-block; background: var(--line); border-radius: 9px; padding: 0 6px; margin-left: 4px; font-size: 11px; }
 .count.warn { background: var(--warn); color: #000; }

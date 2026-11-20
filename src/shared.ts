@@ -13,8 +13,10 @@ import type { UsbPhone } from './main/store/usb'
 import type { CloneOptions, CloneResult } from './main/clone'
 import type { SaveFormat, SaveLayout } from './main/export-calls'
 import type { IntervalUnit, WatchCreated, WatcherStatus, WatchOptions } from './main/watcher'
+import type { RecordingState } from './main/recorder'
 
 export type { IntervalUnit, WatchCreated, WatcherStatus, WatchOptions }
+export type { RecordingState }
 export type { CodeHit, CodeIndex, CodeProgress, CodeSearch, CodeSearchOptions }
 export type { CloneOptions, CloneResult, LogLine, ExchangeSummary, Exchange, TlsFailure, Progress, StoreApp, UsbPhone, PhoneInput, ProxyRule, ReplayEdit, StorageEntry, Refusal, RefusalKind, HooksSnapshot, SaveFormat, SaveLayout }
 /** Where a save wrote, and how many requests made it into the file or folder. */
@@ -145,6 +147,11 @@ export interface Api {
   watch(id: string, options: WatchOptions): Promise<WatchCreated>
   /** Open the watcher dashboard in its own window, at one watch if given. */
   openWatcher(watchId?: string): Promise<void>
+  /** Whether the phone's screen is being recorded. Null before the phone is up. */
+  recordingState(): Promise<RecordingState | null>
+  startRecording(): Promise<RecordingState>
+  /** Stop, then ask where to save the video. Null when the save dialog is cancelled (the video is dropped). */
+  stopRecording(): Promise<{ path: string } | null>
   on(channel: 'progress', cb: (p: Progress) => void): () => void
   on(channel: 'setup-log', cb: (line: string) => void): () => void
   on(channel: 'exchanges', cb: (batch: ExchangeSummary[]) => void): () => void

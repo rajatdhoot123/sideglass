@@ -36,6 +36,10 @@ left; the phone is on the right, and you click and drag on it to use it.
   that app under Frida so those calls can be read.
 - **Phone:** live H.264 video; press, drag, long-press, scroll, and type with the keyboard.
   If the video stream cannot start, it falls back to screenshots (click = tap, drag = swipe).
+- **Record:** **● Record** in the phone toolbar records the screen to a video; **■ Stop** asks where to
+  save it (Movies folder by default). On an emulator the emulator itself records a `.webm` (up to 30 minutes),
+  secure screens such as PIN pads included. On a USB phone Android's `screenrecord` makes an `.mp4`
+  (up to 3 minutes, secure screens blank).
 - **Add apps** (the **+ Add app** button):
   - **App store:** search and install free apps from F-Droid, with a featured shelf.
   - **Play Store link:** paste a link and Sideglass opens it in the Play Store on the capture

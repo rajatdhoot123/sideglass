@@ -38,6 +38,7 @@ import { Logcat, type LogLine } from './logcat'
 import { classifyRefusal, type Refusal } from './refusal'
 import { CaptureProxy, summarize, type Exchange, type ExchangeSummary } from './proxy'
 import { Mirror } from './mirror'
+import { Recorder, type RecordingState } from './recorder'
 import type { Sdk } from './sdk'
 import type { Device, LaunchOptions, LaunchResult, PhoneMode, Settings } from '../shared'
 import type { ProxyRule } from './rules'
@@ -86,6 +87,7 @@ export class Session extends EventEmitter {
   private hooksEnabled = true
   /** Apps we launched, so logcat can be watched for them refusing to run. */
   private refusals = new Map<string, { pid: number | null; seen: Set<Refusal['kind']> }>()
+  private recorder: Recorder | null = null
 
   constructor(
     private readonly dataDir: string,
@@ -743,7 +745,29 @@ export class Session extends EventEmitter {
     return readAppStorage(this.requireAdb(), pkg)
   }
 
+  private requireRecorder(): Recorder {
+    const adb = this.requireAdb()
+    this.recorder ??= new Recorder(adb)
+    return this.recorder
+  }
+
+  recordingState(): RecordingState | null {
+    return this.device ? this.requireRecorder().state : null
+  }
+
+  startRecording(): Promise<RecordingState> {
+    return this.requireRecorder().start()
+  }
+
+  /** Path of the finished video in a temporary folder. The caller moves or deletes it. */
+  stopRecording(): Promise<string> {
+    return this.requireRecorder().stop()
+  }
+
   async stop(): Promise<void> {
+    // Before the emulator goes: a recording left running would keep its file open.
+    await this.recorder?.discard().catch(() => undefined)
+    this.recorder = null
     const decompiler = this.decompilerInstance
     this.decompilerInstance = null
     await decompiler?.dispose().catch(() => undefined)

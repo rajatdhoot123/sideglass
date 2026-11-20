@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { Device, LaunchResult, PhoneMode, Refusal, RefusalKind } from '../../shared'
+import type { Device, LaunchResult, PhoneMode, RecordingState, Refusal, RefusalKind } from '../../shared'
 import { AddApp } from './AddApp'
 import { CloneApp } from './CloneApp'
 import { DeviceScreen, NavKeys, TypeBar } from './DeviceScreen'
@@ -161,6 +161,7 @@ export function Phone({
         <button disabled={!apps.length} title="Install a renamed copy of an app next to the original" onClick={() => setCloning(true)}>
           Clone app
         </button>
+        <RecordButton onStatus={setStatus} />
         <button className="primary" onClick={() => setAdding(true)}>
           + Add app
         </button>
@@ -245,5 +246,60 @@ export function Phone({
           : status || hooksMsg || 'Drop an APK here to install it.'}
       </div>
     </section>
+  )
+}
+
+const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+
+/** Record the phone's screen to a video file; stopping asks where to save it. */
+function RecordButton({ onStatus }: { onStatus: (message: string) => void }) {
+  const [state, setState] = useState<RecordingState | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => void window.api.recordingState().then(setState, () => undefined), [])
+  useEffect(() => {
+    if (!state?.recording) return
+    const timer = setInterval(() => setNow(Date.now()), 500)
+    return () => clearInterval(timer)
+  }, [state?.recording])
+
+  const elapsed = state?.startedAt ? Math.max(0, Math.floor((now - state.startedAt) / 1000)) : 0
+  const ended = Boolean(state?.recording && elapsed >= state.limitS)
+
+  const toggle = async () => {
+    setBusy(true)
+    try {
+      if (state?.recording) {
+        onStatus('Finishing the recording…')
+        const saved = await window.api.stopRecording()
+        setState({ ...state, recording: false, startedAt: null })
+        onStatus(saved ? `Recording saved to ${saved.path}` : 'Recording not saved.')
+      } else {
+        const started = await window.api.startRecording()
+        setState(started)
+        setNow(Date.now())
+        onStatus(`Recording the screen (stops by itself after ${clock(started.limitS)}).`)
+      }
+    } catch (error) {
+      onStatus(`Recording failed: ${(error as Error).message}`)
+      void window.api.recordingState().then(setState, () => undefined)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <button
+      className={state?.recording ? 'on recording' : ''}
+      disabled={busy}
+      title={
+        state?.recording
+          ? 'Stop recording and choose where to save the video'
+          : 'Record the phone screen to a video file. On the virtual phone, secure screens (PIN pads, banking apps) are recorded too.'
+      }
+      onClick={() => void toggle()}
+    >
+      {state?.recording ? `■ ${ended ? 'Save recording' : `Stop ${clock(elapsed)}`}` : '● Record'}
+    </button>
   )
 }
