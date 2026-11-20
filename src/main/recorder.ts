@@ -97,8 +97,14 @@ export class Recorder {
       this.startedAt = null
       const file = this.file
       this.file = ''
-      if (this.emulator) await this.stopEmulator(file)
-      else await this.stopDevice(file)
+      try {
+        if (this.emulator) await this.stopEmulator(file)
+        else await this.stopDevice(file)
+      } catch (error) {
+        // Nobody else will own a half-written file, so drop it here.
+        if (file) await rm(file, { force: true }).catch(() => undefined)
+        throw error
+      }
       return file
     })
   }
